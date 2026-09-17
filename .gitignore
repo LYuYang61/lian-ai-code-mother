@@ -1,0 +1,36 @@
+# Java / Maven
+backend/target/
+**/target/
+.mvn/timing.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Java runtime / logs
+*.log
+hs_err_pid*
+**/tmp/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/*.tsbuildinfo
+
+# Local environment and generated OpenAPI files
+.env
+.env.*.local
+backend/src/main/resources/application-local.yml
+frontend/src/api/generated/
+
+# Personal study notes (kept local, not published)
+STUDY.md
+docs/
+
+# OS files
+.DS_Store
+Thumbs.db
