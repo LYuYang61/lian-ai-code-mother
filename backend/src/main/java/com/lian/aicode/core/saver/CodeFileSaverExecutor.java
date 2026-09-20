@@ -20,13 +20,18 @@ public class CodeFileSaverExecutor {
     private final MultiFileCodeFileSaverTemplate multiFileCodeFileSaver;
 
     @Autowired
-    public CodeFileSaverExecutor(@Value("${app.code-output-root}") String outputRoot) {
-        this(Path.of(outputRoot));
+    public CodeFileSaverExecutor(@Value("${app.code-output-root}") String outputRoot,
+                                 @Value("${app.storage.max-file-size-bytes:2097152}") long maxFileSizeBytes) {
+        this(Path.of(outputRoot), maxFileSizeBytes);
     }
 
     public CodeFileSaverExecutor(Path outputRoot) {
-        this.htmlCodeFileSaver = new HtmlCodeFileSaverTemplate(outputRoot);
-        this.multiFileCodeFileSaver = new MultiFileCodeFileSaverTemplate(outputRoot);
+        this(outputRoot, 2 * 1024 * 1024);
+    }
+
+    public CodeFileSaverExecutor(Path outputRoot, long maxFileSizeBytes) {
+        this.htmlCodeFileSaver = new HtmlCodeFileSaverTemplate(outputRoot, maxFileSizeBytes);
+        this.multiFileCodeFileSaver = new MultiFileCodeFileSaverTemplate(outputRoot, maxFileSizeBytes);
     }
 
     public File executeSaver(Object codeResult, CodeGenTypeEnum codeGenType) {
@@ -45,6 +50,27 @@ public class CodeFileSaverExecutor {
                     throw new BusinessException(ErrorCode.PARAMS_ERROR, "多文件代码结果类型不正确");
                 }
                 yield multiFileCodeFileSaver.saveCode(result);
+            }
+        };
+    }
+
+    /** 将结构化结果保存到指定的应用版本目录。 */
+    public File executeSaver(Object codeResult, CodeGenTypeEnum codeGenType, Path targetDirectory) {
+        if (codeGenType == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "代码生成类型不能为空");
+        }
+        return switch (codeGenType) {
+            case HTML -> {
+                if (!(codeResult instanceof HtmlCodeResult result)) {
+                    throw new BusinessException(ErrorCode.PARAMS_ERROR, "HTML 代码结果类型不正确");
+                }
+                yield htmlCodeFileSaver.saveCode(result, targetDirectory);
+            }
+            case MULTI_FILE -> {
+                if (!(codeResult instanceof MultiFileCodeResult result)) {
+                    throw new BusinessException(ErrorCode.PARAMS_ERROR, "多文件代码结果类型不正确");
+                }
+                yield multiFileCodeFileSaver.saveCode(result, targetDirectory);
             }
         };
     }

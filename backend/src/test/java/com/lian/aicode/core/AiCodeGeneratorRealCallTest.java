@@ -7,6 +7,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         "langchain4j.open-ai.chat-model.api-key=${DEEPSEEK_API_KEY}",
         "langchain4j.open-ai.streaming-chat-model.api-key=${DEEPSEEK_API_KEY}"
 })
+@ActiveProfiles("test")
 class AiCodeGeneratorRealCallTest {
 
     @Autowired

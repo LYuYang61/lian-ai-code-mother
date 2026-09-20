@@ -15,6 +15,10 @@ public class HtmlCodeFileSaverTemplate extends CodeFileSaverTemplate<HtmlCodeRes
         super(outputRoot);
     }
 
+    public HtmlCodeFileSaverTemplate(Path outputRoot, long maxFileSizeBytes) {
+        super(outputRoot, maxFileSizeBytes);
+    }
+
     @Override
     protected void validateInput(HtmlCodeResult result) {
         super.validateInput(result);

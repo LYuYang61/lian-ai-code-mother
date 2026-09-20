@@ -64,11 +64,29 @@ public class AiCodeGeneratorFacade {
         };
     }
 
+    /** 为应用版本生成并保存到指定目录。 */
+    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenType, java.nio.file.Path outputDirectory) {
+        validateRequest(userMessage, codeGenType);
+        AiCodeGeneratorService service = aiServiceSupplier.get();
+        Object result = switch (codeGenType) {
+            case HTML -> service.generateHtmlCode(userMessage);
+            case MULTI_FILE -> service.generateMultiFileCode(userMessage);
+        };
+        return codeFileSaverExecutor.executeSaver(result, codeGenType, outputDirectory);
+    }
+
     /**
      * 根据类型生成并保存代码，同时把模型文本片段实时返回给调用方。
      * 最后的保存动作不产生额外数据，只在成功或失败时结束该 Flux。
      */
     public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenType) {
+        return generateAndSaveCodeStream(userMessage, codeGenType, null);
+    }
+
+    /** 为应用版本流式生成；outputDirectory 为空时保持基础阶段的随机目录行为。 */
+    public Flux<String> generateAndSaveCodeStream(String userMessage,
+                                                   CodeGenTypeEnum codeGenType,
+                                                   java.nio.file.Path outputDirectory) {
         validateRequest(userMessage, codeGenType);
         return Flux.defer(() -> {
             AiCodeGeneratorService service = aiServiceSupplier.get();
@@ -79,7 +97,7 @@ public class AiCodeGeneratorFacade {
             if (codeStream == null) {
                 return Flux.error(new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 未返回代码流"));
             }
-            return processCodeStream(codeStream, codeGenType);
+            return processCodeStream(codeStream, codeGenType, outputDirectory);
         });
     }
 
@@ -89,7 +107,9 @@ public class AiCodeGeneratorFacade {
      * @param codeGenType
      * @return
      */
-    private Flux<String> processCodeStream(Flux<String> codeStream, CodeGenTypeEnum codeGenType) {
+    private Flux<String> processCodeStream(Flux<String> codeStream,
+                                           CodeGenTypeEnum codeGenType,
+                                           java.nio.file.Path outputDirectory) {
         StringBuilder codeBuilder = new StringBuilder();
         return codeStream
                 .doOnNext(chunk -> {
@@ -100,7 +120,9 @@ public class AiCodeGeneratorFacade {
                 .concatWith(Flux.defer(() -> {
                     String completeCode = codeBuilder.toString();
                     Object parsedResult = codeParserExecutor.executeParser(completeCode, codeGenType);
-                    File savedDirectory = codeFileSaverExecutor.executeSaver(parsedResult, codeGenType);
+                    File savedDirectory = outputDirectory == null
+                            ? codeFileSaverExecutor.executeSaver(parsedResult, codeGenType)
+                            : codeFileSaverExecutor.executeSaver(parsedResult, codeGenType, outputDirectory);
                     log.info("代码保存成功：type={}, directory={}",
                             codeGenType.getValue(), savedDirectory.getAbsolutePath());
                     return Flux.empty();

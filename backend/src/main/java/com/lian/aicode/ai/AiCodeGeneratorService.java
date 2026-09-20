@@ -2,6 +2,7 @@ package com.lian.aicode.ai;
 
 import com.lian.aicode.ai.model.HtmlCodeResult;
 import com.lian.aicode.ai.model.MultiFileCodeResult;
+import com.lian.aicode.ai.model.AppNameResult;
 import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
 import reactor.core.publisher.Flux;
@@ -21,6 +22,10 @@ public interface AiCodeGeneratorService {
     /** 生成 HTML、CSS、JavaScript 三文件的结构化结果。 */
     @SystemMessage(fromResource = "prompt/codegen-multi-file-system-prompt.txt")
     MultiFileCodeResult generateMultiFileCode(@UserMessage String userMessage);
+
+    /** 根据需求生成简短应用名；失败时业务层会退回本地截断策略。 */
+    @SystemMessage(fromResource = "prompt/app-name-system-prompt.txt")
+    AppNameResult generateAppName(@UserMessage String userMessage);
 
     /**
      * 生成单 HTML 文件的文本流。

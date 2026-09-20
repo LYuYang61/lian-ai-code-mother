@@ -15,6 +15,10 @@ public class MultiFileCodeFileSaverTemplate extends CodeFileSaverTemplate<MultiF
         super(outputRoot);
     }
 
+    public MultiFileCodeFileSaverTemplate(Path outputRoot, long maxFileSizeBytes) {
+        super(outputRoot, maxFileSizeBytes);
+    }
+
     @Override
     protected void validateInput(MultiFileCodeResult result) {
         super.validateInput(result);

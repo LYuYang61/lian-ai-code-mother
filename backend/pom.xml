@@ -12,10 +12,10 @@
     </parent>
 
     <groupId>com.lian.aicode</groupId>
-    <artifactId>lian-ai-code-monther-backend</artifactId>
+    <artifactId>lian-ai-code-mother-backend</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>lian-ai-code-monther-backend</name>
-    <description>lian-ai-code-monther learning backend</description>
+    <name>lian-ai-code-mother-backend</name>
+    <description>lian-ai-code-mother learning backend</description>
 
     <properties>
         <java.version>21</java.version>
@@ -25,6 +25,8 @@
         <!-- LangChain4j 核心与 Spring/Reactor 扩展使用官方配套版本。 -->
         <langchain4j.version>1.20.0</langchain4j.version>
         <langchain4j.spring.version>1.20.0-beta30</langchain4j.spring.version>
+        <!-- Spring Boot 3 使用 Jakarta 版本的 MyBatis-Flex starter。 -->
+        <mybatis-flex.version>1.11.8</mybatis-flex.version>
     </properties>
 
     <dependencies>
@@ -38,6 +40,31 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
+
+        <!-- DTO 参数校验；校验失败由全局异常处理器统一转成业务响应。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- Hikari 数据源和 Spring JDBC；MyBatis-Flex starter 本身不替代 Boot JDBC starter。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- MyBatis-Flex 负责实体映射、条件构造和分页，不引入 MyBatis-Plus 的包名。 -->
+        <dependency>
+            <groupId>com.mybatis-flex</groupId>
+            <artifactId>mybatis-flex-spring-boot3-starter</artifactId>
+            <version>${mybatis-flex.version}</version>
+        </dependency>
+
+        <!-- 只引入密码编码器，不启用 Spring Security 默认的 Web 登录拦截器。 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
         </dependency>
 
         <!-- 教程要求的 MySQL 驱动；本期还没有数据访问配置，因此启动不会连接数据库。 -->
@@ -92,6 +119,13 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 测试使用 H2 的 MySQL 兼容模式，避免测试依赖开发机上的 MySQL。 -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

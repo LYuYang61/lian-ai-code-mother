@@ -1,4 +1,4 @@
-# lian-ai-code-monther frontend
+# lian-ai-code-mother frontend
 
 本目录是学习项目的 Vue 3 前端，实际在 Windows Node.js 环境运行。
 

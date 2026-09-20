@@ -7,6 +7,15 @@ spring:
   config:
     activate:
       on-profile: local
+  datasource:
+    # Windows MySQL 8 示例；不要把真实密码写入此模板。
+    url: ${MYSQL_URL:jdbc:mysql://127.0.0.1:3306/lian_ai_code?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+mybatis-flex:
+  mapper-locations: classpath:/mapper/**/*.xml
 
 langchain4j:
   open-ai:

@@ -7,6 +7,9 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 
 /**
  * 统一转换 REST 接口异常。
@@ -35,5 +38,32 @@ public class GlobalExceptionHandler {
         log.error("Unexpected request failure: method={}, uri={}",
                 request.getMethod(), request.getRequestURI(), exception);
         return ResultUtils.error(ErrorCode.SYSTEM_ERROR);
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public BaseResponse<?> handleValidationException(MethodArgumentNotValidException exception,
+                                                     HttpServletRequest request) {
+        String message = exception.getBindingResult().getFieldErrors().stream()
+                .findFirst()
+                .map(error -> error.getDefaultMessage())
+                .orElse(ErrorCode.PARAMS_ERROR.getMessage());
+        log.warn("Validation request failed: method={}, uri={}, message={}",
+                request.getMethod(), request.getRequestURI(), message);
+        return ResultUtils.error(ErrorCode.PARAMS_ERROR, message);
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public BaseResponse<?> handleUnreadableMessage(HttpMessageNotReadableException exception,
+                                                   HttpServletRequest request) {
+        log.warn("Malformed JSON request: method={}, uri={}", request.getMethod(), request.getRequestURI());
+        return ResultUtils.error(ErrorCode.PARAMS_ERROR, "请求 JSON 格式错误");
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public BaseResponse<?> handleTypeMismatch(MethodArgumentTypeMismatchException exception,
+                                              HttpServletRequest request) {
+        log.warn("Request parameter type mismatch: method={}, uri={}, parameter={}",
+                request.getMethod(), request.getRequestURI(), exception.getName());
+        return ResultUtils.error(ErrorCode.PARAMS_ERROR, "请求参数类型错误");
     }
 }
