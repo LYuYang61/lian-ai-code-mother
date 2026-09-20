@@ -1,6 +1,6 @@
 spring:
   application:
-    name: lian-ai-code-monther-backend
+    name: lian-ai-code-mother-backend
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:default}
 
@@ -9,6 +9,11 @@ server:
   port: ${SERVER_PORT:8123}
   servlet:
     context-path: ${SERVER_CONTEXT_PATH:/api}
+    session:
+      cookie:
+        http-only: true
+        same-site: lax
+        secure: ${SESSION_COOKIE_SECURE:false}
 
 # springdoc 是 Knife4j OpenAPI 3 starter 的底层规范生成器。
 springdoc:
@@ -34,6 +39,15 @@ knife4j:
 app:
   # AI 生成代码的落盘根目录。模型不能控制文件名，只能写入下方固定的三个文件。
   code-output-root: ${CODE_OUTPUT_ROOT:${user.dir}/tmp/code_output}
+  deploy-output-root: ${CODE_DEPLOY_ROOT:${user.dir}/tmp/code_deploy}
+  deploy:
+    # 开发环境由 Spring Boot 自己提供静态文件；生产环境可改成 Nginx 或对象存储域名。
+    public-base-url: ${APP_DEPLOY_PUBLIC_BASE_URL:http://localhost:8123/api/site}
+  storage:
+    # 限制单条提示词，避免把模型费用和文件系统压力无限暴露给接口调用者。
+    max-prompt-length: ${APP_MAX_PROMPT_LENGTH:10000}
+    # 限制单个生成文件大小，避免模型异常输出耗尽磁盘或差异接口内存。
+    max-file-size-bytes: ${APP_MAX_FILE_SIZE_BYTES:2097152}
   cors:
     # 不使用 * + allowCredentials；如 Windows 前端端口改变，通过环境变量覆盖。
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
@@ -46,7 +60,7 @@ langchain4j:
     chat-model:
       base-url: ${AI_BASE_URL:https://api.deepseek.com}
       model-name: ${AI_MODEL_NAME:deepseek-flash}
-      max-tokens: ${AI_MAX_TOKENS:8192}
+      max-tokens: ${AI_MAX_TOKENS:16384}
       max-retries: ${AI_MAX_RETRIES:2}
       response-format: ${AI_RESPONSE_FORMAT:json_object}
       log-requests: ${AI_LOG_REQUESTS:false}
@@ -54,6 +68,6 @@ langchain4j:
     streaming-chat-model:
       base-url: ${AI_BASE_URL:https://api.deepseek.com}
       model-name: ${AI_MODEL_NAME:deepseek-flash}
-      max-tokens: ${AI_MAX_TOKENS:8192}
+      max-tokens: ${AI_MAX_TOKENS:16384}
       log-requests: ${AI_LOG_REQUESTS:false}
       log-responses: ${AI_LOG_RESPONSES:false}

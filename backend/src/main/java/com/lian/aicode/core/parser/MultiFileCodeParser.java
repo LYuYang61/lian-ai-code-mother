@@ -1,6 +1,8 @@
 package com.lian.aicode.core.parser;
 
 import com.lian.aicode.ai.model.MultiFileCodeResult;
+import com.lian.aicode.exception.BusinessException;
+import com.lian.aicode.exception.ErrorCode;
 
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -17,6 +19,10 @@ public class MultiFileCodeParser implements CodeParser<MultiFileCodeResult> {
     private static final Pattern CODE_BLOCK_PATTERN = Pattern.compile(
             "```[\\t ]*([^\\r\\n]*)\\R(.*?)```", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
+    /** HTML 是三个文件中唯一必填的入口文件，同样必须有闭合标签，截断内容不能进入版本目录。 */
+    private static final Pattern COMPLETE_HTML_PATTERN =
+            Pattern.compile("<\\s*/\\s*(?:body|html)\\s*>", Pattern.CASE_INSENSITIVE);
+
     @Override
     public MultiFileCodeResult parseCode(String codeContent) {
         MultiFileCodeResult result = new MultiFileCodeResult();
@@ -28,6 +34,7 @@ public class MultiFileCodeParser implements CodeParser<MultiFileCodeResult> {
             String label = matcher.group(1).strip().toLowerCase(Locale.ROOT);
             String content = matcher.group(2).strip();
             if (isHtmlLabel(label) && isBlank(result.getHtmlCode())) {
+                requireCompleteHtml(content);
                 result.setHtmlCode(content);
             } else if (isCssLabel(label) && isBlank(result.getCssCode())) {
                 result.setCssCode(content);
@@ -36,6 +43,13 @@ public class MultiFileCodeParser implements CodeParser<MultiFileCodeResult> {
             }
         }
         return result;
+    }
+
+    private void requireCompleteHtml(String htmlCode) {
+        if (htmlCode.isBlank() || !COMPLETE_HTML_PATTERN.matcher(htmlCode).find()) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                    "生成内容不完整（HTML 文档未闭合），已拒绝保存，请重试或简化需求描述");
+        }
     }
 
     private boolean isHtmlLabel(String label) {
@@ -56,3 +70,4 @@ public class MultiFileCodeParser implements CodeParser<MultiFileCodeResult> {
         return value == null || value.isBlank();
     }
 }
+
