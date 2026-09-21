@@ -16,7 +16,7 @@
     </a-page-header>
 
     <a-alert v-if="!canEdit" type="info" show-icon class="readonly-alert"
-      message="当前为只读生成模式，只有应用创建者可以继续与 AI 对话；管理员仍可管理资料和部署。" />
+      message="当前为只读生成模式，只有应用创建者或编辑协作者可以继续与 AI 对话；管理员仍可管理资料和部署。" />
     <a-alert v-else-if="app.generationStatus === 'failed' || app.generationStatus === 'cancelled'"
       type="warning" show-icon class="readonly-alert"
       :message="app.generationMessage || '本次生成未完成，仍可继续使用上一个可用版本。'" />
@@ -41,14 +41,34 @@
         </a-card>
 
         <a-card title="对话历史" :bordered="false" class="panel-card">
+          <template #extra>
+            <a-space size="small">
+              <a-button size="small" :disabled="!history.length" @click="exportHistory">导出 Markdown</a-button>
+              <a-button size="small" :loading="summaryLoading"
+                :disabled="!history.length || !canSummarize || streaming || summaryLoading"
+                @click="summarizeHistory">生成摘要</a-button>
+            </a-space>
+          </template>
+          <a-space v-if="historyStats" size="small" wrap class="history-stats">
+            <a-tag>消息 {{ historyStats.messageCount }}</a-tag>
+            <a-tag>生成轮次 {{ historyStats.roundCount }}</a-tag>
+            <a-tag v-if="historyStats.summaryUpdatedTime" color="purple">已有摘要</a-tag>
+          </a-space>
+          <a-alert v-if="historyError" type="error" show-icon :message="historyError" />
+          <a-button v-if="historyError" type="link" :loading="historyLoading" @click="retryHistory">
+            重新加载对话
+          </a-button>
+          <div v-if="historyHasMore || historyLoading" class="history-load-more">
+            <a-button type="link" :loading="historyLoading" @click="loadOlderHistory">加载更早记录</a-button>
+          </div>
           <div v-if="history.length" ref="historyScrollRef" class="history-scroll">
             <a-list size="small" :data-source="history">
               <template #renderItem="{ item }">
                 <a-list-item>
                   <div class="history-item">
                     <div class="history-item-header">
-                      <a-tag :color="item.messageType === 'user' ? 'blue' : 'green'">
-                        {{ item.messageType === 'user' ? '我' : 'AI' }}
+                      <a-tag :color="historyMessageColor(item.messageType)">
+                        {{ historyMessageText(item.messageType) }}
                       </a-tag>
                       <a-button v-if="(item.message || '').length > 120" type="link" size="small"
                         class="history-toggle" @click="toggleHistory(item.id)">
@@ -63,14 +83,40 @@
               </template>
             </a-list>
           </div>
-          <a-empty v-else description="还没有对话记录" />
+          <a-empty v-else-if="!historyError" description="还没有对话记录" />
+        </a-card>
+
+        <a-card v-if="canManage" title="协作者" :bordered="false" class="panel-card">
+          <a-space wrap>
+            <a-input v-model:value="collaboratorUserId" style="width: 150px" placeholder="用户 ID" />
+            <a-select v-model:value="collaboratorRole" style="width: 110px">
+              <a-select-option value="editor">可编辑</a-select-option>
+              <a-select-option value="viewer">只读</a-select-option>
+            </a-select>
+            <a-button type="primary" :loading="collaboratorSaving" @click="saveCollaborator">添加/更新</a-button>
+          </a-space>
+          <a-list v-if="collaborators.length" size="small" class="collaborator-list">
+            <template #renderItem="{ item }">
+              <a-list-item>
+                <span>{{ item.userName || item.userAccount || item.userId }}</span>
+                <a-space>
+                  <a-tag>{{ item.role === 'editor' ? '可编辑' : '只读' }}</a-tag>
+                  <a-button type="link" danger size="small" @click="removeCollaborator(item.userId)">移除</a-button>
+                </a-space>
+              </a-list-item>
+            </template>
+          </a-list>
+          <a-empty v-else description="暂未添加协作者" />
         </a-card>
       </a-col>
 
       <a-col :xs="24" :lg="15">
         <a-card title="实时预览" :bordered="false">
           <template #extra>
-            <a-tag v-if="app.currentVersion > 0">当前版本 v{{ app.currentVersion }}</a-tag>
+            <a-space size="small">
+              <a-tag v-if="app.currentVersion > 0">当前版本 v{{ app.currentVersion }}</a-tag>
+              <a-tag v-if="app.deployedVersion" color="blue">线上版本 v{{ app.deployedVersion }}</a-tag>
+            </a-space>
           </template>
           <div class="preview-frame-wrap">
             <iframe v-if="previewUrl" :key="previewUrl" class="preview-frame" :src="previewUrl" title="应用预览" />
@@ -136,6 +182,7 @@
       <a-descriptions-item label="生成模式">{{ app.codeGenType === 'multi_file' ? 'HTML + CSS + JS' : '单 HTML' }}</a-descriptions-item>
       <a-descriptions-item label="可见范围">{{ app.visibility === 'public' ? '公开' : '私有' }}</a-descriptions-item>
       <a-descriptions-item label="精选状态">{{ app.featuredStatus }}</a-descriptions-item>
+      <a-descriptions-item label="对话轮次">{{ app.conversationRounds }}</a-descriptions-item>
       <a-descriptions-item label="初始需求">{{ app.initPrompt }}</a-descriptions-item>
     </a-descriptions>
     <a-space v-if="canManage" wrap class="detail-actions">
@@ -167,10 +214,16 @@
     </a-tabs>
     <a-empty v-else description="暂无差异结果" />
   </a-modal>
+
+  <a-modal v-model:open="summaryOpen" title="对话摘要" :footer="null">
+    <a-alert v-if="summary" type="info" show-icon message="摘要仅用于帮助模型恢复上下文，数据库中的原始对话不会被替换。" />
+    <pre v-if="summary" class="summary-output">{{ summary.summary }}</pre>
+    <a-empty v-else description="暂无摘要" />
+  </a-modal>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -183,14 +236,32 @@ import {
   disableDeployment,
   enableDeployment,
   getApp,
-  listHistory,
+  addCollaborator,
+  listCollaborators,
   listVersions,
+  removeCollaborator as removeCollaboratorRequest,
   resolveApiPath,
   rollbackVersion,
   stopGeneration,
   updateApp,
 } from '@/api/app'
-import type { AppGenerationStatus, AppVersionDiffVO, AppVO, AppVersionVO, ChatHistoryVO } from '@/api/types'
+import {
+  exportChatHistory,
+  getChatHistoryStats,
+  listAppChatHistory,
+  summarizeChatHistory,
+} from '@/api/chatHistory'
+import type {
+  AppCollaboratorRole,
+  AppCollaboratorVO,
+  AppGenerationStatus,
+  AppVersionDiffVO,
+  AppVO,
+  AppVersionVO,
+  ChatHistoryStatsVO,
+  ChatHistoryVO,
+  ChatSummaryVO,
+} from '@/api/types'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
@@ -200,6 +271,19 @@ const app = ref<AppVO | null>(null)
 const loadError = ref('')
 const versions = ref<AppVersionVO[]>([])
 const history = ref<ChatHistoryVO[]>([])
+const historyCursorTime = ref<string | null>(null)
+const historyCursorId = ref<string | null>(null)
+const historyHasMore = ref(false)
+const historyLoading = ref(false)
+const historyError = ref('')
+const historyStats = ref<ChatHistoryStatsVO | null>(null)
+const summary = ref<ChatSummaryVO | null>(null)
+const summaryOpen = ref(false)
+const summaryLoading = ref(false)
+const collaborators = ref<AppCollaboratorVO[]>([])
+const collaboratorUserId = ref('')
+const collaboratorRole = ref<AppCollaboratorRole>('editor')
+const collaboratorSaving = ref(false)
 // 对话历史限高滚动容器；最新消息在底部，加载后自动滚到底部。
 const historyScrollRef = ref<HTMLElement | null>(null)
 // 记录被展开全文的消息 id；用重建 Set 的方式变更以保证响应式。
@@ -245,7 +329,12 @@ const canManage = computed(() => {
   return userStore.isAdmin || userStore.user?.id === app.value.userId
 })
 // 管理员可以运营应用，但不能代替创建者发起 AI 生成，避免误触发他人的模型费用。
-const canEdit = computed(() => Boolean(app.value && userStore.user?.id === app.value.userId))
+const canEdit = computed(() => {
+  if (!app.value || !userStore.isLogin || !userStore.user) return false
+  return app.value.userId === userStore.user.id
+    || collaborators.value.some((item) => item.userId === userStore.user?.id && item.role === 'editor')
+})
+const canSummarize = computed(() => canManage.value || canEdit.value)
 const canApplyFeatured = computed(() => canManage.value
   && userStore.user?.id === app.value?.userId
   && app.value?.visibility === 'public'
@@ -257,18 +346,117 @@ const previewUrl = computed(() => {
   return resolveApiPath(`/preview/${app.value.id}/${app.value.currentVersion}/`)
 })
 
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (error instanceof Error && error.message) return error.message
+  return fallback
+}
+
+const resetHistory = () => {
+  history.value = []
+  historyCursorTime.value = null
+  historyCursorId.value = null
+  historyHasMore.value = false
+  historyError.value = ''
+  historyStats.value = null
+  summary.value = null
+}
+
+const loadHistory = async (reset = false, notifyError = false) => {
+  if (!userStore.isLogin || historyLoading.value) return false
+  if (reset) resetHistory()
+  historyError.value = ''
+  historyLoading.value = true
+  const oldHeight = historyScrollRef.value?.scrollHeight || 0
+  const oldTop = historyScrollRef.value?.scrollTop || 0
+  try {
+    const response = await listAppChatHistory(appId.value, {
+      pageSize: 10,
+      lastCreateTime: reset ? undefined : historyCursorTime.value || undefined,
+      lastId: reset ? undefined : historyCursorId.value || undefined,
+    })
+    if (response.data.code !== 0 || !response.data.data) {
+      if (reset) resetHistory()
+      throw new Error(response.data.message || (reset ? '加载对话历史失败' : '加载更早对话失败'))
+    }
+    const page = response.data.data
+    // 后端按最新到最旧返回；界面按时间正序展示，便于阅读对话流。
+    const incoming = [...page.records].reverse()
+    history.value = reset ? incoming : [...incoming, ...history.value]
+    historyCursorTime.value = page.nextCreateTime || null
+    historyCursorId.value = page.nextId || null
+    historyHasMore.value = page.hasMore
+    if (reset) {
+      void scrollHistoryToBottom()
+    } else {
+      await nextTick()
+      const scrollElement = historyScrollRef.value
+      if (scrollElement) {
+        scrollElement.scrollTop = oldTop + scrollElement.scrollHeight - oldHeight
+      }
+    }
+    return true
+  } catch (error) {
+    historyError.value = getErrorMessage(error, reset ? '加载对话历史失败' : '加载更早对话失败')
+    if (notifyError) throw error
+    return false
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+const loadOlderHistory = async () => {
+  await loadHistory(false, true).catch((error: unknown) => {
+    message.error(getErrorMessage(error, '加载更早对话失败'))
+  })
+}
+
+const retryHistory = async () => {
+  await loadHistory(true, true).catch((error: unknown) => {
+    message.error(getErrorMessage(error, '加载对话历史失败'))
+  })
+}
+
+const loadHistoryStats = async () => {
+  if (!userStore.isLogin) return
+  try {
+    const response = await getChatHistoryStats(appId.value)
+    if (response.data.code === 0) historyStats.value = response.data.data
+  } catch {
+    // 统计不是工作区主功能，权限不足或网络失败不阻断应用页面。
+  }
+}
+
+const loadCollaborators = async () => {
+  if (!userStore.isLogin) return
+  try {
+    const response = await listCollaborators(appId.value)
+    if (response.data.code === 0) collaborators.value = response.data.data || []
+  } catch {
+    collaborators.value = []
+  }
+}
+
 const loadAll = async () => {
   const appResponse = await getApp(appId.value)
   if (appResponse.data.code !== 0 || !appResponse.data.data) throw new Error(appResponse.data.message)
-  app.value = appResponse.data.data
-  const canReadPrivateData = userStore.isAdmin || userStore.user?.id === app.value.userId
-  const [versionResponse, historyResponse] = await Promise.all([
-    listVersions(appId.value),
-    canReadPrivateData ? listHistory(appId.value) : Promise.resolve(null),
-  ])
+  const loadedApp = appResponse.data.data
+  const versionResponse = await listVersions(appId.value)
+  if (versionResponse.data.code !== 0 || !versionResponse.data.data) {
+    throw new Error(versionResponse.data.message)
+  }
+  // 版本接口也成功后再提交页面主状态，避免应用详情请求成功、版本请求失败时永久展示半加载页面。
+  app.value = loadedApp
   versions.value = versionResponse.data.data?.filter((item) => item.status === 'ready') || []
-  history.value = historyResponse?.data.data || []
-  void scrollHistoryToBottom()
+  collaborators.value = []
+  resetHistory()
+  // 成员、历史和统计彼此独立；任何一个辅助请求失败都不应让工作区永久转圈。
+  await loadCollaborators()
+  const historyLoaded = await loadHistory(true, true).catch((error: unknown) => {
+    // 历史是工作区的重要数据，首屏失败必须给出反馈，但不能覆盖已经成功加载的应用详情。
+    message.error(getErrorMessage(error, '加载对话历史失败'))
+    return false
+  })
+  await loadHistoryStats()
   if (versions.value.length > 1) {
     const [newest, previous] = versions.value
     if (newest && previous) {
@@ -276,11 +464,7 @@ const loadAll = async () => {
       diffTo.value = newest.versionNo
     }
   }
-}
-
-const getErrorMessage = (error: unknown, fallback: string) => {
-  if (error instanceof Error && error.message) return error.message
-  return fallback
+  return historyLoaded
 }
 
 const refreshApp = async (fallback = '刷新应用状态失败') => {
@@ -295,11 +479,31 @@ const refreshApp = async (fallback = '刷新应用状态失败') => {
 
 const loadPage = async () => {
   loadError.value = ''
+  // 先清空旧应用状态，避免路由复用或版本接口失败时继续展示旧应用内容。
+  eventSource?.close()
+  eventSource = null
+  streaming.value = false
+  app.value = null
+  versions.value = []
+  prompt.value = ''
+  streamOutput.value = ''
+  diffOpen.value = false
+  diffResult.value = null
+  diffFrom.value = 0
+  diffTo.value = 0
+  summaryOpen.value = false
+  detailOpen.value = false
+  editOpen.value = false
+  expandedHistory.value = new Set<string>()
+  resetHistory()
   try {
-    await loadAll()
-    // 首次进入草稿应用自动使用初始化需求开始生成；?view=1 只用于浏览，不触发模型调用。
-    if (route.query.view !== '1' && canEdit.value && app.value?.generationStatus === 'draft') {
-      prompt.value = app.value.initPrompt
+    const historyLoaded = await loadAll()
+    // loadAll 在异步函数内部填充 ref，显式保留其运行时联合类型，避免 TS 按当前函数内赋值把它收窄为 never。
+    const loadedApp = app.value as AppVO | null
+    // 只有历史确实加载成功且为空时，才自动使用初始化需求；网络/权限错误不能误触发模型调用。
+    if (historyLoaded && loadedApp && route.query.view !== '1' && canEdit.value
+      && loadedApp.generationStatus === 'draft' && history.value.length === 0) {
+      prompt.value = loadedApp.initPrompt
       sendMessage()
     }
   } catch (error) {
@@ -310,7 +514,7 @@ const loadPage = async () => {
 
 const sendMessage = () => {
   if (!canEdit.value) {
-    message.info('当前应用只读，只有应用创建者可以生成代码')
+    message.info('当前应用只读，只有创建者或编辑协作者可以生成代码')
     return
   }
   if (streaming.value || !prompt.value.trim()) {
@@ -321,6 +525,7 @@ const sendMessage = () => {
   streamOutput.value = ''
   const source = new EventSource(createCodeStreamUrl(appId.value, prompt.value.trim()), { withCredentials: true })
   let streamSettled = false
+  let serverErrorHandled = false
   eventSource = source
   const closeStream = () => {
     if (streamSettled) return false
@@ -355,6 +560,7 @@ const sendMessage = () => {
     })()
   })
   source.addEventListener('error', (event) => {
+    serverErrorHandled = true
     if (!closeStream()) return
     const customEvent = event as MessageEvent<string>
     try {
@@ -366,6 +572,7 @@ const sendMessage = () => {
     void refreshApp()
   })
   source.onerror = () => {
+    if (serverErrorHandled) return
     if (!closeStream()) return
     message.error('SSE 连接中断，请查看应用状态后重试')
     void refreshApp()
@@ -536,6 +743,112 @@ const showDiff = async () => {
   }
 }
 
+const exportHistory = async () => {
+  try {
+    const response = await exportChatHistory(appId.value)
+    const contentType = String(response.headers['content-type'] || '').toLowerCase()
+    if (contentType.includes('application/json')) {
+      const raw = response.data instanceof Blob ? await response.data.text() : ''
+      let errorMessage = '导出对话历史失败'
+      try {
+        const payload = JSON.parse(raw) as { message?: string }
+        errorMessage = payload.message || errorMessage
+      } catch {
+        // 错误响应不是 JSON 时使用统一兜底提示，不能把 JSON 错误体当 Markdown 下载。
+      }
+      throw new Error(errorMessage)
+    }
+    const url = URL.createObjectURL(response.data)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `chat-history-${appId.value}.md`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    message.success('对话历史已导出')
+  } catch (error) {
+    message.error(getErrorMessage(error, '导出对话历史失败'))
+  }
+}
+
+const summarizeHistory = async () => {
+  if (!canSummarize.value) {
+    message.info('只有创建者、编辑协作者或管理员可以生成摘要')
+    return
+  }
+  if (summaryLoading.value || streaming.value) return
+  summaryLoading.value = true
+  try {
+    const response = await summarizeChatHistory(appId.value)
+    if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
+    summary.value = response.data.data
+    summaryOpen.value = true
+    await loadHistoryStats()
+    message.success('对话摘要已生成')
+  } catch (error) {
+    const errorMessage = getErrorMessage(error, '生成对话摘要失败')
+    if (errorMessage.toLowerCase().includes('timeout')) {
+      message.warning('摘要请求等待超时，后端可能仍在处理，请稍后刷新查看摘要状态，避免重复提交')
+    } else {
+      message.error(errorMessage)
+    }
+  } finally {
+    summaryLoading.value = false
+  }
+}
+
+const saveCollaborator = async () => {
+  if (!app.value || !canManage.value) return
+  const userId = collaboratorUserId.value.trim()
+  if (!/^\d+$/.test(userId) || userId === app.value.userId) {
+    message.warning('请输入有效的协作者用户 ID，且不能是应用创建者')
+    return
+  }
+  collaboratorSaving.value = true
+  try {
+    const response = await addCollaborator({ appId: app.value.id, userId, role: collaboratorRole.value })
+    if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
+    collaboratorUserId.value = ''
+    await loadCollaborators()
+    message.success('协作者已保存')
+  } catch (error) {
+    message.error(getErrorMessage(error, '保存协作者失败'))
+  } finally {
+    collaboratorSaving.value = false
+  }
+}
+
+const removeCollaborator = (userId: string) => {
+  if (!app.value || !canManage.value) return
+  Modal.confirm({
+    title: '确认移除该协作者？',
+    content: '移除后，该用户将不能继续查看或编辑这个应用。',
+    onOk: async () => {
+      try {
+        const response = await removeCollaboratorRequest({ appId: app.value!.id, userId })
+        if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
+        await loadCollaborators()
+        message.success('协作者已移除')
+      } catch (error) {
+        message.error(getErrorMessage(error, '移除协作者失败'))
+      }
+    },
+  })
+}
+
+const historyMessageText = (messageType: ChatHistoryVO['messageType']) => ({
+  user: '我',
+  ai: 'AI',
+  error: '状态',
+}[messageType])
+
+const historyMessageColor = (messageType: ChatHistoryVO['messageType']) => ({
+  user: 'blue',
+  ai: 'green',
+  error: 'red',
+}[messageType])
+
 const statusText = (status: AppGenerationStatus) => ({
   draft: '待生成', generating: '生成中', ready: '已完成', failed: '失败', cancelled: '已取消',
 }[status])
@@ -544,6 +857,7 @@ const statusColor = (status: AppGenerationStatus) => ({
 }[status])
 
 onMounted(() => void loadPage())
+watch(appId, () => void loadPage())
 onBeforeUnmount(() => eventSource?.close())
 </script>
 
@@ -601,6 +915,14 @@ onBeforeUnmount(() => eventSource?.close())
   overflow-y: auto;
 }
 
+.history-stats {
+  margin-bottom: 8px;
+}
+
+.history-load-more {
+  text-align: center;
+}
+
 .history-item {
   width: 100%;
 }
@@ -634,6 +956,21 @@ onBeforeUnmount(() => eventSource?.close())
 
 .detail-actions {
   margin-top: 20px;
+}
+
+.collaborator-list {
+  margin-top: 12px;
+}
+
+.summary-output {
+  max-height: 480px;
+  margin-top: 16px;
+  padding: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f8fafc;
+  border-radius: 8px;
 }
 
 .diff-output {

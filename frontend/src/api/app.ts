@@ -2,6 +2,8 @@ import type {
   AppVO,
   AppVersionVO,
   AppVersionDiffVO,
+  AppCollaboratorRole,
+  AppCollaboratorVO,
   BaseResponse,
   ChatHistoryVO,
   CodeGenType,
@@ -88,6 +90,18 @@ export function diffVersions(appId: string, fromVersion: number, toVersion: numb
 
 export function listHistory(appId: string) {
   return request.get<BaseResponse<ChatHistoryVO[]>>('/app/chat/history', { params: { appId } })
+}
+
+export function listCollaborators(appId: string) {
+  return request.get<BaseResponse<AppCollaboratorVO[]>>('/app/collaborator/list', { params: { appId } })
+}
+
+export function addCollaborator(data: { appId: string; userId: string; role: AppCollaboratorRole }) {
+  return request.post<BaseResponse<boolean>>('/app/collaborator/add', data)
+}
+
+export function removeCollaborator(data: { appId: string; userId: string }) {
+  return request.post<BaseResponse<boolean>>('/app/collaborator/remove', data)
 }
 
 export function deployApp(appId: string) {

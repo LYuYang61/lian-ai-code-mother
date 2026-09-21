@@ -19,6 +19,7 @@ import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.spring.service.impl.ServiceImpl;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -35,6 +36,7 @@ import java.util.List;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class UserServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount> implements UserService {
 
     private final PasswordEncoder passwordEncoder;
@@ -57,6 +59,7 @@ public class UserServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         if (!save(user)) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "注册失败");
         }
+        log.info("用户注册成功：userId={}", user.getId());
         return user.getId();
     }
 
@@ -68,6 +71,8 @@ public class UserServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号或密码错误");
         }
         request.getSession(true).setAttribute(UserConstant.USER_LOGIN_STATE, user.getId());
+        log.info("用户登录成功：userId={}, sessionStore={}", user.getId(),
+                request.getSession(false).getClass().getSimpleName());
         return getLoginUserVO(user);
     }
 
@@ -138,7 +143,9 @@ public class UserServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         if (request.getSession(false) == null) {
             return true;
         }
+        Object userId = request.getSession(false).getAttribute(UserConstant.USER_LOGIN_STATE);
         request.getSession(false).invalidate();
+        log.info("用户退出登录：userId={}", userId);
         return true;
     }
 

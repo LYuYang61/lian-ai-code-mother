@@ -13,6 +13,19 @@ spring:
     username: ${MYSQL_USERNAME:root}
     password: ${MYSQL_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
+  session:
+    store-type: redis
+    timeout: ${SESSION_TIMEOUT:30d}
+    redis:
+      namespace: ${SPRING_SESSION_REDIS_NAMESPACE:lian:session}
+      flush-mode: on_save
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      username: ${REDIS_USERNAME:}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
 
 mybatis-flex:
   mapper-locations: classpath:/mapper/**/*.xml

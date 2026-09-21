@@ -54,6 +54,18 @@
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
 
+        <!-- Spring Data Redis：承载 AI 对话记忆和可选的分布式 Session。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- Spring Boot 3.5 对应的 Spring Session Redis 模块，版本由 Boot BOM 管理。 -->
+        <dependency>
+            <groupId>org.springframework.session</groupId>
+            <artifactId>spring-session-data-redis</artifactId>
+        </dependency>
+
         <!-- MyBatis-Flex 负责实体映射、条件构造和分页，不引入 MyBatis-Plus 的包名。 -->
         <dependency>
             <groupId>com.mybatis-flex</groupId>
@@ -107,6 +119,12 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-reactor</artifactId>
             <version>${langchain4j.spring.version}</version>
+        </dependency>
+
+        <!-- 缓存按应用隔离的 AI Service，设置容量和过期策略避免本地内存无限增长。 -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
         </dependency>
 
         <!-- Knife4j OpenAPI 3 Jakarta starter，提供增强后的中文接口文档页面。 -->

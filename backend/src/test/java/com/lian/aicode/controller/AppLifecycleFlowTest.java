@@ -100,6 +100,43 @@ class AppLifecycleFlowTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("version-one")));
 
+        // 协作者可以查看应用，但 viewer 不能发起会产生模型费用的生成任务；更新为 editor 后保留编辑权限。
+        String collaboratorAccount = "collab_" + shortId();
+        MockHttpSession collaboratorSession = registerAndLogin(collaboratorAccount, "协作者");
+        UserAccount collaborator = userAccountMapper.selectOneByQuery(
+                com.mybatisflex.core.query.QueryWrapper.create().eq("user_account", collaboratorAccount));
+        mockMvc.perform(post("/app/collaborator/add").session(ownerSession)
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"appId\":\"" + appId + "\",\"userId\":\""
+                                + collaborator.getId() + "\",\"role\":\"viewer\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").value(true));
+        mockMvc.perform(get("/app/get/vo").param("id", appId).session(collaboratorSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.id").value(appId));
+        mockMvc.perform(get("/app/chat/gen/code").session(collaboratorSession)
+                        .param("appId", appId).param("message", "只读用户不应生成"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40101));
+        mockMvc.perform(post("/app/collaborator/add").session(ownerSession)
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"appId\":\"" + appId + "\",\"userId\":\""
+                                + collaborator.getId() + "\",\"role\":\"unsupported\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40000));
+        mockMvc.perform(post("/chatHistory/app/" + appId + "/summarize").session(collaboratorSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40101));
+        mockMvc.perform(post("/app/collaborator/add").session(ownerSession)
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"appId\":\"" + appId + "\",\"userId\":\""
+                                + collaborator.getId() + "\",\"role\":\"editor\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").value(true));
+        mockMvc.perform(get("/chatHistory/app/" + appId).session(collaboratorSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.records.length()").value(2));
+
         String secondStream = generate(ownerSession, appId, "把页面改成第二版");
         assertTrue(secondStream.contains("event:done"));
         mockMvc.perform(get("/app/version/diff")
@@ -120,6 +157,23 @@ class AppLifecycleFlowTest {
         mockMvc.perform(get("/app/chat/history").param("appId", appId))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(40101));
+        mockMvc.perform(get("/chatHistory/app/" + appId).session(ownerSession)
+                        .param("pageSize", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.records.length()").value(1))
+                .andExpect(jsonPath("$.data.records[0].messageType").value("ai"))
+                .andExpect(jsonPath("$.data.hasMore").value(true));
+        mockMvc.perform(get("/chatHistory/app/" + appId + "/stats").session(ownerSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.messageCount").value(4))
+                .andExpect(jsonPath("$.data.roundCount").value(2));
+        mockMvc.perform(get("/chatHistory/app/" + appId + "/export").session(ownerSession))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("任务工作台 对话历史")));
+        when(aiCodeGeneratorService.summarizeConversation(anyString())).thenReturn("任务页面已经完成第一版和第二版迭代。");
+        mockMvc.perform(post("/chatHistory/app/" + appId + "/summarize").session(ownerSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.summary").value(containsString("任务页面")));
         mockMvc.perform(get("/preview/" + appId + "/1/"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(40101));
@@ -136,6 +190,9 @@ class AppLifecycleFlowTest {
         mockMvc.perform(get("/site/" + deployKey + "/"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("version-two")));
+        mockMvc.perform(get("/app/get/vo").param("id", appId).session(ownerSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.deployedVersion").value(2));
 
         mockMvc.perform(post("/app/deploy/disable")
                         .session(ownerSession).contentType(APPLICATION_JSON)
@@ -156,6 +213,10 @@ class AppLifecycleFlowTest {
         mockMvc.perform(get("/site/" + deployKey + "/"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("version-one")));
+        mockMvc.perform(get("/app/get/vo").param("id", appId).session(ownerSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.currentVersion").value(1))
+                .andExpect(jsonPath("$.data.deployedVersion").value(1));
 
         MvcResult runningRequest = mockMvc.perform(get("/app/chat/gen/code")
                         .session(ownerSession).accept(MediaType.TEXT_EVENT_STREAM)
@@ -184,6 +245,11 @@ class AppLifecycleFlowTest {
 
         UserAccount admin = promoteToAdmin("admin_" + shortId());
         MockHttpSession adminSession = login(admin.getUserAccount(), "password-123");
+        mockMvc.perform(post("/chatHistory/admin/list/page/vo").session(adminSession)
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"pageNum\":1,\"pageSize\":20,\"appId\":\"" + appId + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.total").value(6));
         mockMvc.perform(post("/app/update")
                         .session(adminSession).contentType(APPLICATION_JSON)
                         .content("{\"id\":\"" + appId + "\",\"appName\":\"越权修改\"}"))
@@ -211,6 +277,9 @@ class AppLifecycleFlowTest {
         assertFalse(Files.exists(storageService.versionDirectory(numericAppId, 1)));
         assertFalse(Files.exists(storageService.deployDirectory(deployKey)));
         mockMvc.perform(get("/app/get/vo").param("id", appId).session(ownerSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40400));
+        mockMvc.perform(get("/chatHistory/app/" + appId).session(ownerSession))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(40400));
     }

@@ -14,13 +14,13 @@ import java.io.Serial;
 import java.io.Serializable;
 import java.time.LocalDateTime;
 
-/** 应用对话历史，用于恢复上下文、审计生成记录和展示用户操作。 */
+/** 应用协作者；协作者只共享应用工作区权限，不自动获得应用运营权限。 */
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Table("chat_history")
-public class ChatHistory implements Serializable {
+@Table("app_collaborator")
+public class AppCollaborator implements Serializable {
 
     @Serial
     private static final long serialVersionUID = 1L;
@@ -28,27 +28,16 @@ public class ChatHistory implements Serializable {
     @Id(keyType = KeyType.Generator, value = KeyGenerators.snowFlakeId)
     private Long id;
 
-    private String message;
-
-    @Column("message_type")
-    private String messageType;
-
     @Column("app_id")
     private Long appId;
 
     @Column("user_id")
     private Long userId;
 
-    /** 关联的用户消息 id；用于把 AI 回复、失败信息和原始提示词串成一轮对话。 */
-    @Column("parent_id")
-    private Long parentId;
+    private String role;
 
-    @Column("version_no")
-    private Integer versionNo;
-
-    /** 成功生成版本包含的相对文件名 JSON 数组，不保存服务器绝对路径。 */
-    @Column("file_list")
-    private String fileList;
+    @Column("invited_by")
+    private Long invitedBy;
 
     @Column("create_time")
     private LocalDateTime createTime;

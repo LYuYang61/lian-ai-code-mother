@@ -45,6 +45,8 @@ export interface AppVO {
   tags?: string | null
   generationStatus: AppGenerationStatus
   currentVersion: number
+  deployedVersion?: number | null
+  conversationRounds: number
   generationMessage?: string | null
   featuredStatus: string
   featuredReason?: string | null
@@ -71,10 +73,50 @@ export interface AppVersionVO {
 export interface ChatHistoryVO {
   id: string
   appId: string
+  userId: string
   message: string
-  messageType: 'user' | 'ai'
+  messageType: 'user' | 'ai' | 'error'
+  parentId?: string | null
   versionNo?: number | null
+  fileList?: string | null
   createTime: string
+}
+
+export interface CursorPageResult<T> {
+  records: T[]
+  hasMore: boolean
+  nextCreateTime?: string | null
+  nextId?: string | null
+}
+
+export interface ChatHistoryStatsVO {
+  appId: string
+  messageCount: number
+  roundCount: number
+  lastCreateTime?: string | null
+  summaryUpdatedTime?: string | null
+}
+
+export interface ChatSummaryVO {
+  appId: string
+  summary: string
+  coveredUntilId?: string | null
+  coveredUntilTime?: string | null
+  messageCount: number
+  updateTime?: string | null
+}
+
+export type AppCollaboratorRole = 'viewer' | 'editor'
+
+export interface AppCollaboratorVO {
+  id: string
+  appId: string
+  userId: string
+  userAccount?: string | null
+  userName?: string | null
+  userAvatar?: string | null
+  role: AppCollaboratorRole
+  createTime?: string | null
 }
 
 export interface AppVersionDiffVO {

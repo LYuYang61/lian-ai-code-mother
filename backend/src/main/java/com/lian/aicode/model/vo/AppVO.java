@@ -22,6 +22,8 @@ public class AppVO {
     private String tags;
     private String generationStatus;
     private Integer currentVersion;
+    private Integer deployedVersion;
+    private Integer conversationRounds;
     private String generationMessage;
     private String featuredStatus;
     private String featuredReason;

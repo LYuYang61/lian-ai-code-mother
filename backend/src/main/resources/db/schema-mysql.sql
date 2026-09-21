@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS app (
     tags VARCHAR(500) NULL,
     generation_status VARCHAR(16) NOT NULL DEFAULT 'draft',
     current_version INT NOT NULL DEFAULT 0,
+    deployed_version INT NULL,
+    conversation_rounds INT NOT NULL DEFAULT 0,
     generation_message VARCHAR(512) NULL,
     featured_status VARCHAR(16) NOT NULL DEFAULT 'none',
     featured_reason VARCHAR(500) NULL,
@@ -70,16 +72,51 @@ CREATE TABLE IF NOT EXISTS app_version (
 
 CREATE TABLE IF NOT EXISTS chat_history (
     id BIGINT NOT NULL PRIMARY KEY,
-    message TEXT NOT NULL,
+    -- 以 Java 字符数限制消息；UTF-8 多字节字符可能超过 TEXT 的 64 KiB，使用 MEDIUMTEXT 留出安全余量。
+    message MEDIUMTEXT NOT NULL,
     message_type VARCHAR(16) NOT NULL,
     app_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
+    parent_id BIGINT NULL,
     version_no INT NULL,
+    file_list TEXT NULL,
     create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     is_delete TINYINT NOT NULL DEFAULT 0,
     KEY idx_history_app (app_id, create_time, is_delete),
+    KEY idx_history_cursor (app_id, create_time, id, is_delete),
     KEY idx_history_user (user_id, create_time),
     CONSTRAINT fk_history_app FOREIGN KEY (app_id) REFERENCES app (id),
     CONSTRAINT fk_history_user FOREIGN KEY (user_id) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS app_chat_summary (
+    id BIGINT NOT NULL PRIMARY KEY,
+    app_id BIGINT NOT NULL,
+    summary MEDIUMTEXT NOT NULL,
+    covered_until_id BIGINT NULL,
+    covered_until_time DATETIME(3) NULL,
+    message_count INT NOT NULL DEFAULT 0,
+    create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    is_delete TINYINT NOT NULL DEFAULT 0,
+    UNIQUE KEY uk_summary_app (app_id),
+    KEY idx_summary_delete (is_delete),
+    CONSTRAINT fk_summary_app FOREIGN KEY (app_id) REFERENCES app (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS app_collaborator (
+    id BIGINT NOT NULL PRIMARY KEY,
+    app_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    role VARCHAR(16) NOT NULL DEFAULT 'editor',
+    invited_by BIGINT NOT NULL,
+    create_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    update_time DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    is_delete TINYINT NOT NULL DEFAULT 0,
+    UNIQUE KEY uk_collaborator_app_user (app_id, user_id, is_delete),
+    KEY idx_collaborator_user (user_id, is_delete),
+    CONSTRAINT fk_collaborator_app FOREIGN KEY (app_id) REFERENCES app (id),
+    CONSTRAINT fk_collaborator_user FOREIGN KEY (user_id) REFERENCES user_account (id),
+    CONSTRAINT fk_collaborator_inviter FOREIGN KEY (invited_by) REFERENCES user_account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

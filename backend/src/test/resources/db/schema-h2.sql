@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS app (
     tags VARCHAR(500),
     generation_status VARCHAR(16) NOT NULL DEFAULT 'draft',
     current_version INT NOT NULL DEFAULT 0,
+    deployed_version INT,
+    conversation_rounds INT NOT NULL DEFAULT 0,
     generation_message VARCHAR(512),
     featured_status VARCHAR(16) NOT NULL DEFAULT 'none',
     featured_reason VARCHAR(500),
@@ -61,8 +63,35 @@ CREATE TABLE IF NOT EXISTS chat_history (
     message_type VARCHAR(16) NOT NULL,
     app_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
+    parent_id BIGINT,
     version_no INT,
+    file_list CLOB,
     create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_delete INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS app_chat_summary (
+    id BIGINT PRIMARY KEY,
+    app_id BIGINT NOT NULL,
+    summary CLOB NOT NULL,
+    covered_until_id BIGINT,
+    covered_until_time TIMESTAMP,
+    message_count INT NOT NULL DEFAULT 0,
+    create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_delete INT NOT NULL DEFAULT 0,
+    UNIQUE (app_id)
+);
+
+CREATE TABLE IF NOT EXISTS app_collaborator (
+    id BIGINT PRIMARY KEY,
+    app_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    role VARCHAR(16) NOT NULL DEFAULT 'editor',
+    invited_by BIGINT NOT NULL,
+    create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_delete INT NOT NULL DEFAULT 0,
+    UNIQUE (app_id, user_id, is_delete)
 );

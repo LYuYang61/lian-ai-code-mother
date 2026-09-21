@@ -10,8 +10,11 @@ public class ChatHistoryVO {
 
     private Long id;
     private Long appId;
+    private Long userId;
     private String message;
     private String messageType;
+    private Long parentId;
     private Integer versionNo;
+    private String fileList;
     private String createTime;
 }

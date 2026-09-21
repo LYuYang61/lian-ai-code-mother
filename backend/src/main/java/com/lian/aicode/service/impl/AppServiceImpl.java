@@ -1,5 +1,7 @@
 package com.lian.aicode.service.impl;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lian.aicode.ai.AiCodeGeneratorService;
 import com.lian.aicode.ai.model.AppNameResult;
 import com.lian.aicode.core.AiCodeGeneratorFacade;
@@ -7,15 +9,14 @@ import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.mapper.AppMapper;
 import com.lian.aicode.mapper.AppVersionMapper;
-import com.lian.aicode.mapper.ChatHistoryMapper;
 import com.lian.aicode.model.dto.app.AppAddRequest;
 import com.lian.aicode.model.dto.app.AppAdminUpdateRequest;
+import com.lian.aicode.model.dto.app.AppCollaboratorRequest;
 import com.lian.aicode.model.dto.app.AppFeaturedRequest;
 import com.lian.aicode.model.dto.app.AppQueryRequest;
 import com.lian.aicode.model.dto.app.AppUpdateRequest;
 import com.lian.aicode.model.entity.App;
 import com.lian.aicode.model.entity.AppVersion;
-import com.lian.aicode.model.entity.ChatHistory;
 import com.lian.aicode.model.entity.UserAccount;
 import com.lian.aicode.model.enums.AppDeploymentStatusEnum;
 import com.lian.aicode.model.enums.AppFeaturedStatusEnum;
@@ -26,12 +27,15 @@ import com.lian.aicode.model.enums.ChatHistoryMessageTypeEnum;
 import com.lian.aicode.model.enums.CodeGenTypeEnum;
 import com.lian.aicode.model.vo.AppVersionDiffVO;
 import com.lian.aicode.model.vo.AppVersionVO;
+import com.lian.aicode.model.vo.AppCollaboratorVO;
 import com.lian.aicode.model.vo.AppVO;
 import com.lian.aicode.model.vo.ChatHistoryVO;
 import com.lian.aicode.model.vo.PageResult;
 import com.lian.aicode.model.vo.UserVO;
 import com.lian.aicode.service.AppService;
+import com.lian.aicode.service.AppCollaboratorService;
 import com.lian.aicode.service.AppStorageService;
+import com.lian.aicode.service.ChatHistoryService;
 import com.lian.aicode.service.GenerationCancelledException;
 import com.lian.aicode.service.GenerationTaskManager;
 import com.lian.aicode.service.UserService;
@@ -44,6 +48,8 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.SignalType;
@@ -87,10 +93,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".toCharArray();
 
     private final AppVersionMapper appVersionMapper;
-    private final ChatHistoryMapper chatHistoryMapper;
     private final UserService userService;
+    private final AppCollaboratorService collaboratorService;
+    private final ChatHistoryService chatHistoryService;
     private final AiCodeGeneratorFacade aiCodeGeneratorFacade;
     private final ObjectProvider<AiCodeGeneratorService> aiCodeGeneratorServiceProvider;
+    private final ObjectMapper objectMapper;
     private final AppStorageService storageService;
     private final GenerationTaskManager taskManager;
 
@@ -122,6 +130,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         app.setPriority(0);
         app.setGenerationStatus(AppGenerationStatusEnum.DRAFT.getValue());
         app.setCurrentVersion(0);
+        app.setConversationRounds(0);
         app.setFeaturedStatus(AppFeaturedStatusEnum.NONE.getValue());
         app.setDeploymentStatus(AppDeploymentStatusEnum.UNDEPLOYED.getValue());
         app.setCreateTime(LocalDateTime.now());
@@ -271,10 +280,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         assertOwnerOrAdmin(app, loginUser);
         taskManager.cancel(appId);
         deleteRelatedData(appId);
+        chatHistoryService.deleteByAppId(appId);
+        collaboratorService.deleteByAppId(appId);
         boolean removed = removeById(appId);
         if (removed) {
-            storageService.deleteApplicationFiles(appId);
-            storageService.deleteDeployment(app.getDeployKey());
+            // 数据库事务回滚时不能提前删除 Redis 记忆和磁盘文件；提交成功后再做外部资源清理。
+            registerDeleteCleanup(appId, app.getDeployKey());
         }
         return removed;
     }
@@ -283,8 +294,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     public Flux<String> chatToGenCode(Long appId, String message, UserAccount loginUser) {
         requireLogin(loginUser);
         App app = requireApp(appId);
-        if (!app.getUserId().equals(loginUser.getId())) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者可以生成代码");
+        if (!collaboratorService.canEdit(app, loginUser)) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者或编辑协作者可以生成代码");
         }
         if (message == null || message.isBlank()) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "提示词不能为空");
@@ -297,13 +308,18 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
 
         GenerationTaskManager.GenerationTask task = taskManager.start(appId);
         AppVersion version;
+        com.lian.aicode.model.entity.ChatHistory userHistory;
         try {
             version = reserveVersion(app, prompt, codeGenType, loginUser.getId());
             try {
-                saveChatMessage(appId, loginUser.getId(), prompt, ChatHistoryMessageTypeEnum.USER.getValue(), null);
+                userHistory = chatHistoryService.addMessage(appId, loginUser.getId(), prompt,
+                        ChatHistoryMessageTypeEnum.USER, null, version.getVersionNo(), null);
+                if (mapper.incrementConversationRounds(appId) <= 0) {
+                    throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新对话轮次失败");
+                }
             } catch (RuntimeException exception) {
                 // 版本已预留但用户消息写入失败时不能留下“永远生成中”的孤儿任务。
-                markGenerationFailed(appId, version, exception);
+                markGenerationFailed(appId, version, null, exception);
                 throw exception;
             }
         } catch (RuntimeException exception) {
@@ -315,7 +331,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         AtomicBoolean sourceCompleted = new AtomicBoolean(false);
         AtomicBoolean stateMarked = new AtomicBoolean(false);
         Flux<String> source = aiCodeGeneratorFacade.generateAndSaveCodeStream(
-                        prompt, codeGenType, storageService.versionDirectory(appId, version.getVersionNo()))
+                        appId, prompt, codeGenType,
+                        storageService.versionDirectory(appId, version.getVersionNo()), userHistory.getId())
                 .doOnNext(chunk -> {
                     if (chunk != null && aiMessage.length() < MAX_CHAT_HISTORY_MESSAGE_LENGTH) {
                         int remaining = MAX_CHAT_HISTORY_MESSAGE_LENGTH - aiMessage.length();
@@ -329,25 +346,36 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 .takeUntilOther(task.cancelSignal())
                 .doOnComplete(() -> {
                     if (stateMarked.compareAndSet(false, true)) {
-                        if (sourceCompleted.get() && !task.isCancelled()) {
-                            markGenerationReady(appId, version, aiMessage.toString());
-                        } else {
-                            markGenerationCancelled(appId, version);
+                        try {
+                            // 上游已经完整结束时，停止请求只能算“来晚了”，不能把可用版本改成取消态。
+                            if (sourceCompleted.get()) {
+                                markGenerationReady(appId, version, userHistory.getId(), aiMessage.toString());
+                            } else {
+                                markGenerationCancelled(appId, version, userHistory.getId());
+                            }
+                        } catch (RuntimeException completionError) {
+                            // 终态收口失败时，不能因为 stateMarked 已置位而遗留 generating 孤儿版本。
+                            try {
+                                markGenerationFailed(appId, version, userHistory.getId(), completionError);
+                            } catch (RuntimeException stateError) {
+                                log.error("生成终态收口失败：appId={}, version={}", appId, version.getVersionNo(), stateError);
+                            }
+                            throw completionError;
                         }
                     }
                 })
                 // takeUntilOther 会以“正常完成”结束下游；追加显式取消错误，避免控制器误发 done。
-                .concatWith(Flux.defer(() -> task.isCancelled()
+                .concatWith(Flux.defer(() -> task.isCancelled() && !sourceCompleted.get()
                         ? Flux.error(new GenerationCancelledException()) : Flux.empty()))
                 .doOnError(error -> {
                     if (stateMarked.compareAndSet(false, true)) {
-                        markGenerationFailed(appId, version, error);
+                        markGenerationFailed(appId, version, userHistory.getId(), error);
                     }
                 })
                 .doFinally(signal -> {
                     // 浏览器断开 SSE 时，上游收到 cancel，不会触发 doOnComplete；仍需收口数据库状态。
                     if (signal == SignalType.CANCEL && stateMarked.compareAndSet(false, true)) {
-                        markGenerationCancelled(appId, version);
+                        markGenerationCancelled(appId, version, userHistory.getId());
                     }
                     taskManager.finish(appId, task);
                 });
@@ -357,7 +385,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     public boolean stopGeneration(Long appId, UserAccount loginUser) {
         requireLogin(loginUser);
         App app = requireApp(appId);
-        assertOwnerOrAdmin(app, loginUser);
+        if (!collaboratorService.canEdit(app, loginUser)) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者或编辑协作者可以停止生成");
+        }
         return taskManager.cancel(appId);
     }
 
@@ -367,18 +397,38 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
+        return deployReadyVersion(appId, app);
+    }
+
+    /** 执行部署文件切换并保存数据库状态；调用方必须已经完成权限校验。 */
+    private String deployReadyVersion(Long appId, App app) {
         AppVersion version = requireReadyVersion(appId, app.getCurrentVersion());
         Path sourceDirectory = storageService.resolveVersionPath(version.getRelativePath());
         String deployKey = StringUtils.hasText(app.getDeployKey()) ? app.getDeployKey() : generateDeployKey();
-        storageService.deploy(sourceDirectory, deployKey);
-        App update = new App();
-        update.setId(appId);
-        update.setDeployKey(deployKey);
-        update.setDeployedTime(LocalDateTime.now());
-        update.setDeploymentStatus(AppDeploymentStatusEnum.DEPLOYED.getValue());
-        update.setUpdateTime(update.getDeployedTime());
-        if (!updateById(update)) {
-            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存部署状态失败");
+        String oldDeployKey = app.getDeployKey();
+        // currentVersion 是用户当前选中的版本，不一定是部署目录正在提供的版本。
+        // 兼容历史数据：旧记录没有 deployedVersion 时退回 currentVersion。
+        Integer oldVersionNo = app.getDeployedVersion() == null
+                ? app.getCurrentVersion() : app.getDeployedVersion();
+        boolean fileSwitched = false;
+        try {
+            storageService.deploy(sourceDirectory, deployKey);
+            fileSwitched = true;
+            App update = new App();
+            update.setId(appId);
+            update.setDeployKey(deployKey);
+            update.setDeployedVersion(version.getVersionNo());
+            update.setDeployedTime(LocalDateTime.now());
+            update.setDeploymentStatus(AppDeploymentStatusEnum.DEPLOYED.getValue());
+            update.setUpdateTime(update.getDeployedTime());
+            if (!updateById(update)) {
+                throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存部署状态失败");
+            }
+        } catch (RuntimeException exception) {
+            if (fileSwitched) {
+                restoreDeploymentAfterDatabaseFailure(appId, oldDeployKey, oldVersionNo, deployKey);
+            }
+            throw exception;
         }
         return buildDeployUrl(deployKey);
     }
@@ -404,8 +454,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
-        String url = deployApp(appId, loginUser);
-        return url;
+        return deployReadyVersion(appId, app);
     }
 
     @Override
@@ -431,6 +480,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
         AppVersion targetVersion = requireReadyVersion(appId, versionNo);
+        Integer oldVersionNo = app.getDeployedVersion() == null
+                ? app.getCurrentVersion() : app.getDeployedVersion();
         // 如果当前应用已在线，回滚必须同步替换部署目录，否则数据库显示的当前版本和线上内容会不一致。
         if (AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus())) {
             if (!StringUtils.hasText(app.getDeployKey())) {
@@ -441,10 +492,23 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         App update = new App();
         update.setId(appId);
         update.setCurrentVersion(versionNo);
+        if (AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus())) {
+            update.setDeployedVersion(versionNo);
+        }
         update.setGenerationStatus(AppGenerationStatusEnum.READY.getValue());
         update.setGenerationMessage("已回滚到版本 " + versionNo);
         update.setUpdateTime(LocalDateTime.now());
-        return updateById(update);
+        try {
+            if (!updateById(update)) {
+                throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存回滚状态失败");
+            }
+            return true;
+        } catch (RuntimeException exception) {
+            if (AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus())) {
+                restoreDeploymentAfterDatabaseFailure(appId, app.getDeployKey(), oldVersionNo, app.getDeployKey());
+            }
+            throw exception;
+        }
     }
 
     @Override
@@ -476,14 +540,29 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
 
     @Override
     public List<ChatHistoryVO> listChatHistory(Long appId, UserAccount loginUser) {
-        App app = requireApp(appId);
-        assertReadable(app, loginUser);
-        if (!canManage(app, loginUser)) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者或管理员可以查看对话历史");
+        // 兼容第四期旧接口的错误语义：公开应用的访客可以看应用，但不能枚举私有对话审计记录。
+        if (loginUser == null) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有登录用户才能查看应用对话历史");
         }
-        return chatHistoryMapper.selectListByQuery(
-                        QueryWrapper.create().eq("app_id", appId).orderBy("create_time", true))
-                .stream().map(this::toChatHistoryVO).toList();
+        return chatHistoryService.listRecent(appId, loginUser, 200);
+    }
+
+    @Override
+    public List<AppCollaboratorVO> listCollaborators(Long appId, UserAccount loginUser) {
+        requireLogin(loginUser);
+        return collaboratorService.list(appId, loginUser);
+    }
+
+    @Override
+    public boolean addCollaborator(AppCollaboratorRequest request, UserAccount loginUser) {
+        requireLogin(loginUser);
+        return collaboratorService.add(request, loginUser);
+    }
+
+    @Override
+    public boolean removeCollaborator(AppCollaboratorRequest request, UserAccount loginUser) {
+        requireLogin(loginUser);
+        return collaboratorService.remove(request, loginUser);
     }
 
     @Override
@@ -660,6 +739,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         if (user != null && (userService.isAdmin(user) || app.getUserId().equals(user.getId()))) {
             return;
         }
+        if (collaboratorService.canView(app, user)) {
+            return;
+        }
         if (AppVisibilityEnum.PUBLIC.getValue().equals(app.getVisibility())
                 && app.getCurrentVersion() != null && app.getCurrentVersion() > 0) {
             return;
@@ -728,13 +810,15 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         return version;
     }
 
-    private void markGenerationReady(Long appId, AppVersion version, String aiMessage) {
+    private void markGenerationReady(Long appId, AppVersion version, Long parentId, String aiMessage) {
         AppVersion updateVersion = new AppVersion();
         updateVersion.setId(version.getId());
         updateVersion.setStatus(AppVersionStatusEnum.READY.getValue());
         updateVersion.setDescription("AI 代码生成完成");
         updateVersion.setUpdateTime(LocalDateTime.now());
-        appVersionMapper.update(updateVersion);
+        if (appVersionMapper.update(updateVersion) <= 0) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存代码版本完成状态失败");
+        }
 
         App updateApp = new App();
         updateApp.setId(appId);
@@ -742,20 +826,38 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         updateApp.setGenerationStatus(AppGenerationStatusEnum.READY.getValue());
         updateApp.setGenerationMessage("版本 " + version.getVersionNo() + " 已生成");
         updateApp.setUpdateTime(LocalDateTime.now());
-        updateById(updateApp);
+        if (!updateById(updateApp)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存应用生成完成状态失败");
+        }
         if (StringUtils.hasText(aiMessage)) {
-            saveChatMessage(appId, version.getCreatedBy(), aiMessage,
-                    ChatHistoryMessageTypeEnum.AI.getValue(), version.getVersionNo());
+            try {
+                chatHistoryService.addMessage(appId, version.getCreatedBy(), aiMessage,
+                        ChatHistoryMessageTypeEnum.AI, parentId, version.getVersionNo(),
+                        toJson(storageService.listRelativeFiles(storageService.versionDirectory(
+                                appId, version.getVersionNo()))));
+                log.info("保存成功生成对话记录：appId={}, version={}", appId, version.getVersionNo());
+            } catch (RuntimeException exception) {
+                // 版本已经可靠落盘；历史写入失败不能把已可用版本回滚，但必须留下告警。
+                log.error("保存成功生成对话记录失败：appId={}, version={}", appId, version.getVersionNo(), exception);
+            }
+        }
+        try {
+            chatHistoryService.triggerSummaryIfNeeded(appId);
+        } catch (RuntimeException exception) {
+            // 摘要属于异步优化项，不能把已经成功落盘的代码版本误报成生成失败。
+            log.warn("触发应用对话摘要失败，不影响代码版本：appId={}, version={}", appId, version.getVersionNo(), exception);
         }
     }
 
-    private void markGenerationCancelled(Long appId, AppVersion version) {
+    private void markGenerationCancelled(Long appId, AppVersion version, Long parentId) {
         AppVersion updateVersion = new AppVersion();
         updateVersion.setId(version.getId());
         updateVersion.setStatus(AppVersionStatusEnum.CANCELLED.getValue());
         updateVersion.setDescription("用户停止了本次生成");
         updateVersion.setUpdateTime(LocalDateTime.now());
-        appVersionMapper.update(updateVersion);
+        if (appVersionMapper.update(updateVersion) <= 0) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存代码版本取消状态失败");
+        }
         storageService.deleteVersionDirectory(appId, version.getVersionNo());
 
         App updateApp = new App();
@@ -763,17 +865,23 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         updateApp.setGenerationStatus(AppGenerationStatusEnum.CANCELLED.getValue());
         updateApp.setGenerationMessage("生成已取消");
         updateApp.setUpdateTime(LocalDateTime.now());
-        updateById(updateApp);
+        if (!updateById(updateApp)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存应用生成取消状态失败");
+        }
+        recordGenerationEvent(appId, version, parentId, "本次生成已取消");
     }
 
-    private void markGenerationFailed(Long appId, AppVersion version, Throwable error) {
-        log.warn("应用代码生成失败：appId={}, version={}, reason={}", appId, version.getVersionNo(), error.getMessage());
+    private void markGenerationFailed(Long appId, AppVersion version, Long parentId, Throwable error) {
+        String errorType = error == null ? "未知异常" : error.getClass().getSimpleName();
+        log.warn("应用代码生成失败：appId={}, version={}, errorType={}", appId, version.getVersionNo(), errorType);
         AppVersion updateVersion = new AppVersion();
         updateVersion.setId(version.getId());
         updateVersion.setStatus(AppVersionStatusEnum.FAILED.getValue());
         updateVersion.setDescription("生成失败");
         updateVersion.setUpdateTime(LocalDateTime.now());
-        appVersionMapper.update(updateVersion);
+        if (appVersionMapper.update(updateVersion) <= 0) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存代码版本失败状态失败");
+        }
         storageService.deleteVersionDirectory(appId, version.getVersionNo());
 
         App updateApp = new App();
@@ -781,35 +889,80 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         updateApp.setGenerationStatus(AppGenerationStatusEnum.FAILED.getValue());
         updateApp.setGenerationMessage("生成失败，请检查模型配置或稍后重试");
         updateApp.setUpdateTime(LocalDateTime.now());
-        updateById(updateApp);
-    }
-
-    private void saveChatMessage(Long appId, Long userId, String message, String type, Integer versionNo) {
-        ChatHistory history = new ChatHistory();
-        history.setAppId(appId);
-        history.setUserId(userId);
-        history.setMessage(limitHistoryMessage(message));
-        history.setMessageType(type);
-        history.setVersionNo(versionNo);
-        history.setCreateTime(LocalDateTime.now());
-        history.setUpdateTime(history.getCreateTime());
-        history.setIsDelete(0);
-        chatHistoryMapper.insert(history);
-    }
-
-    private String limitHistoryMessage(String message) {
-        if (message == null || message.length() <= MAX_CHAT_HISTORY_MESSAGE_LENGTH) {
-            return message;
+        if (!updateById(updateApp)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存应用生成失败状态失败");
         }
-        return message.substring(0, MAX_CHAT_HISTORY_MESSAGE_LENGTH)
-                + "\n[内容已截断，完整代码请查看对应版本文件]";
+        // 不把模型供应商、数据库或文件系统异常原文写入用户可见历史，避免泄露内部信息。
+        recordGenerationEvent(appId, version, parentId, "本次生成失败，请检查模型配置或稍后重试");
+    }
+
+    private void recordGenerationEvent(Long appId, AppVersion version, Long parentId, String message) {
+        try {
+            chatHistoryService.addMessage(appId, version.getCreatedBy(), message,
+                    ChatHistoryMessageTypeEnum.ERROR, parentId, version.getVersionNo(), null);
+            log.info("保存生成结果事件：appId={}, version={}, messageType=error", appId, version.getVersionNo());
+        } catch (RuntimeException exception) {
+            // 状态收口不能因为审计记录失败而再次抛出，避免 SSE 已结束后出现二次异常。
+            log.error("保存生成结果事件失败：appId={}, version={}", appId, version.getVersionNo(), exception);
+        }
     }
 
     private void deleteRelatedData(Long appId) {
-        appVersionMapper.selectListByQuery(QueryWrapper.create().eq("app_id", appId))
-                .forEach(version -> appVersionMapper.deleteById(version.getId()));
-        chatHistoryMapper.selectListByQuery(QueryWrapper.create().eq("app_id", appId))
-                .forEach(history -> chatHistoryMapper.deleteById(history.getId()));
+        appVersionMapper.deleteByQuery(QueryWrapper.create().eq("app_id", appId));
+    }
+
+    /**
+     * 注册删除后的外部资源清理。
+     *
+     * <p>数据库逻辑删除和磁盘/Redis 不属于同一个事务；只有提交成功后才清理外部资源，
+     * 避免数据库回滚后应用记录还在、但代码文件和会话记忆已经消失。</p>
+     */
+    private void registerDeleteCleanup(Long appId, String deployKey) {
+        Runnable cleanup = () -> {
+            try {
+                aiCodeGeneratorFacade.evictAppMemory(appId);
+                storageService.deleteApplicationFiles(appId);
+                storageService.deleteDeployment(deployKey);
+                log.info("删除应用外部资源清理完成：appId={}, deployKeyPresent={}", appId,
+                        StringUtils.hasText(deployKey));
+            } catch (RuntimeException exception) {
+                // 文件和缓存清理是补偿动作；失败不能逆转已提交的数据库删除，但必须可追踪。
+                log.error("删除应用外部资源清理失败：appId={}", appId, exception);
+            }
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    cleanup.run();
+                }
+            });
+        } else {
+            cleanup.run();
+        }
+    }
+
+    /** 数据库状态保存失败时尽量恢复部署目录，避免“数据库未切换、线上文件已切换”。 */
+    private void restoreDeploymentAfterDatabaseFailure(Long appId, String oldDeployKey,
+                                                       Integer oldVersionNo, String switchedDeployKey) {
+        try {
+            AppVersion oldVersion = oldVersionNo == null || oldVersionNo <= 0 ? null
+                    : appVersionMapper.selectOneByQuery(QueryWrapper.create()
+                    .eq("app_id", appId).eq("version_no", oldVersionNo)
+                    .eq("status", AppVersionStatusEnum.READY.getValue()));
+            if (StringUtils.hasText(oldDeployKey) && oldVersion != null) {
+                storageService.deploy(storageService.resolveVersionPath(oldVersion.getRelativePath()), oldDeployKey);
+                if (!oldDeployKey.equals(switchedDeployKey)) {
+                    storageService.deleteDeployment(switchedDeployKey);
+                }
+                log.info("恢复旧部署目录完成：appId={}, version={}", appId, oldVersionNo);
+            } else {
+                storageService.deleteDeployment(switchedDeployKey);
+                log.info("清理未提交部署目录完成：appId={}", appId);
+            }
+        } catch (RuntimeException restoreException) {
+            log.error("恢复部署目录失败：appId={}, oldVersion={}", appId, oldVersionNo, restoreException);
+        }
     }
 
     private AppVersion requireReadyVersion(Long appId, Integer versionNo) {
@@ -840,7 +993,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 .deployKey(app.getDeployKey()).deployedTime(stringValue(app.getDeployedTime()))
                 .priority(app.getPriority()).userId(app.getUserId()).visibility(app.getVisibility())
                 .category(app.getCategory()).tags(app.getTags()).generationStatus(app.getGenerationStatus())
-                .currentVersion(app.getCurrentVersion()).generationMessage(app.getGenerationMessage())
+                .currentVersion(app.getCurrentVersion())
+                .deployedVersion(app.getDeployedVersion())
+                .conversationRounds(app.getConversationRounds() == null ? 0 : app.getConversationRounds())
+                .generationMessage(app.getGenerationMessage())
                 .featuredStatus(app.getFeaturedStatus()).featuredReason(app.getFeaturedReason())
                 .deploymentStatus(app.getDeploymentStatus()).createTime(stringValue(app.getCreateTime()))
                 .updateTime(stringValue(app.getUpdateTime())).owner(owner)
@@ -857,12 +1013,6 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 .createTime(stringValue(version.getCreateTime())).build();
     }
 
-    private ChatHistoryVO toChatHistoryVO(ChatHistory history) {
-        return ChatHistoryVO.builder().id(history.getId()).appId(history.getAppId()).message(history.getMessage())
-                .messageType(history.getMessageType()).versionNo(history.getVersionNo())
-                .createTime(stringValue(history.getCreateTime())).build();
-    }
-
     private String generateAppName(String prompt) {
         AiCodeGeneratorService aiService = aiCodeGeneratorServiceProvider.getIfAvailable();
         if (aiService != null) {
@@ -875,7 +1025,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                     }
                 }
             } catch (RuntimeException exception) {
-                log.info("AI 应用命名失败，使用本地回退名称：{}", exception.getMessage());
+                log.info("AI 应用命名失败，使用本地回退名称：errorType={}",
+                        exception.getClass().getSimpleName());
             }
         }
         String fallback = prompt.replaceAll("\\s+", " ").trim();
@@ -926,6 +1077,15 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
 
     private String trimToNull(String value) {
         return StringUtils.hasText(value) ? value.trim() : null;
+    }
+
+    private String toJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            log.warn("序列化版本文件列表失败", exception);
+            return "[]";
+        }
     }
 
     private String generateDeployKey() {

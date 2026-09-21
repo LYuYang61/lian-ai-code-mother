@@ -2,6 +2,7 @@ package com.lian.aicode.service;
 
 import com.lian.aicode.model.dto.app.AppAddRequest;
 import com.lian.aicode.model.dto.app.AppAdminUpdateRequest;
+import com.lian.aicode.model.dto.app.AppCollaboratorRequest;
 import com.lian.aicode.model.dto.app.AppFeaturedRequest;
 import com.lian.aicode.model.dto.app.AppQueryRequest;
 import com.lian.aicode.model.dto.app.AppUpdateRequest;
@@ -10,6 +11,7 @@ import com.lian.aicode.model.entity.UserAccount;
 import com.lian.aicode.model.vo.AppVersionDiffVO;
 import com.lian.aicode.model.vo.AppVersionVO;
 import com.lian.aicode.model.vo.AppVO;
+import com.lian.aicode.model.vo.AppCollaboratorVO;
 import com.lian.aicode.model.vo.ChatHistoryVO;
 import com.lian.aicode.model.vo.PageResult;
 import reactor.core.publisher.Flux;
@@ -53,6 +55,12 @@ public interface AppService {
     AppVersionDiffVO diff(Long appId, Integer fromVersion, Integer toVersion, UserAccount loginUser);
 
     List<ChatHistoryVO> listChatHistory(Long appId, UserAccount loginUser);
+
+    List<AppCollaboratorVO> listCollaborators(Long appId, UserAccount loginUser);
+
+    boolean addCollaborator(AppCollaboratorRequest request, UserAccount loginUser);
+
+    boolean removeCollaborator(AppCollaboratorRequest request, UserAccount loginUser);
 
     boolean applyFeatured(AppFeaturedRequest request, UserAccount loginUser);
 

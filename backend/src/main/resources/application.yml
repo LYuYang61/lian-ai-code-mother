@@ -3,6 +3,20 @@ spring:
     name: lian-ai-code-mother-backend
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:default}
+  # 默认不强制连接 Redis；local profile 会开启 Redis Session，测试 profile 明确关闭它。
+  session:
+    store-type: ${SPRING_SESSION_STORE_TYPE:none}
+    # Spring Session 使用该属性控制服务端会话的最大不活跃时间；不要只依赖 Servlet 容器配置。
+    timeout: ${SESSION_TIMEOUT:30d}
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      username: ${REDIS_USERNAME:}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:2s}
+      timeout: ${REDIS_COMMAND_TIMEOUT:2s}
 
 server:
   # Windows IDEA 默认直接运行 backend；前端 Vite 通过代理访问该端口。
@@ -10,10 +24,12 @@ server:
   servlet:
     context-path: ${SERVER_CONTEXT_PATH:/api}
     session:
+      timeout: ${SESSION_TIMEOUT:30d}
       cookie:
         http-only: true
         same-site: lax
         secure: ${SESSION_COOKIE_SECURE:false}
+        max-age: ${SESSION_COOKIE_MAX_AGE:30d}
 
 # springdoc 是 Knife4j OpenAPI 3 starter 的底层规范生成器。
 springdoc:
@@ -48,6 +64,32 @@ app:
     max-prompt-length: ${APP_MAX_PROMPT_LENGTH:10000}
     # 限制单个生成文件大小，避免模型异常输出耗尽磁盘或差异接口内存。
     max-file-size-bytes: ${APP_MAX_FILE_SIZE_BYTES:2097152}
+  ai:
+    chat-memory:
+      # 真实 local 环境默认使用 Redis；测试可关闭以避免依赖外部服务。
+      enabled: ${AI_CHAT_MEMORY_ENABLED:true}
+      key-prefix: ${AI_CHAT_MEMORY_KEY_PREFIX:lian:ai:chat-memory}
+      ttl: ${AI_CHAT_MEMORY_TTL:86400s}
+      max-messages: ${AI_CHAT_MEMORY_MAX_MESSAGES:20}
+      service-cache-max-size: ${AI_SERVICE_CACHE_MAX_SIZE:1000}
+      service-cache-expire-after-write: ${AI_SERVICE_CACHE_EXPIRE_AFTER_WRITE:30m}
+      service-cache-expire-after-access: ${AI_SERVICE_CACHE_EXPIRE_AFTER_ACCESS:10m}
+  collaboration:
+    max-members: ${APP_COLLABORATION_MAX_MEMBERS:20}
+  chat-history:
+    max-message-length: ${CHAT_HISTORY_MAX_MESSAGE_LENGTH:20000}
+    cursor-page-size: ${CHAT_HISTORY_CURSOR_PAGE_SIZE:10}
+    summary-trigger-count: ${CHAT_HISTORY_SUMMARY_TRIGGER_COUNT:40}
+    summary-executor-core-size: ${CHAT_HISTORY_SUMMARY_EXECUTOR_CORE_SIZE:1}
+    summary-executor-max-size: ${CHAT_HISTORY_SUMMARY_EXECUTOR_MAX_SIZE:2}
+    summary-executor-queue-capacity: ${CHAT_HISTORY_SUMMARY_EXECUTOR_QUEUE_CAPACITY:50}
+  web:
+    async:
+      # SSE 使用有界 MVC 异步线程池；长任务超时可通过环境变量调整，避免使用默认无限创建线程的执行器。
+      core-size: ${MVC_ASYNC_CORE_SIZE:4}
+      max-size: ${MVC_ASYNC_MAX_SIZE:16}
+      queue-capacity: ${MVC_ASYNC_QUEUE_CAPACITY:200}
+      timeout: ${MVC_ASYNC_TIMEOUT:30m}
   cors:
     # 不使用 * + allowCredentials；如 Windows 前端端口改变，通过环境变量覆盖。
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}

@@ -27,6 +27,10 @@ public interface AiCodeGeneratorService {
     @SystemMessage(fromResource = "prompt/app-name-system-prompt.txt")
     AppNameResult generateAppName(@UserMessage String userMessage);
 
+    /** 压缩历史对话，摘要只用于后续模型上下文，不替代数据库原始记录。 */
+    @SystemMessage(fromResource = "prompt/chat-summary-system-prompt.txt")
+    String summarizeConversation(@UserMessage String conversation);
+
     /**
      * 生成单 HTML 文件的文本流。
      * LangChain4j 的 Reactor 扩展会把底层 TokenStream 转为 Flux<String>。

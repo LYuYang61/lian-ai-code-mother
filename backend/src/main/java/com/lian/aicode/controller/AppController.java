@@ -8,6 +8,7 @@ import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.model.dto.app.AppAddRequest;
 import com.lian.aicode.model.dto.app.AppAdminUpdateRequest;
+import com.lian.aicode.model.dto.app.AppCollaboratorRequest;
 import com.lian.aicode.model.dto.app.AppDeployRequest;
 import com.lian.aicode.model.dto.app.AppFeaturedRequest;
 import com.lian.aicode.model.dto.app.AppQueryRequest;
@@ -18,6 +19,7 @@ import com.lian.aicode.model.entity.UserAccount;
 import com.lian.aicode.model.vo.AppVersionDiffVO;
 import com.lian.aicode.model.vo.AppVersionVO;
 import com.lian.aicode.model.vo.AppVO;
+import com.lian.aicode.model.vo.AppCollaboratorVO;
 import com.lian.aicode.model.vo.ChatHistoryVO;
 import com.lian.aicode.model.vo.PageResult;
 import com.lian.aicode.service.AppService;
@@ -29,13 +31,10 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.core.io.FileSystemResource;
-import org.springframework.core.io.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
-import org.springframework.util.StringUtils;
-import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -54,6 +53,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 /** 应用 CRUD、AI 生成、版本管理和部署接口。 */
+@Slf4j
 @Tag(name = "应用接口")
 @RestController
 @RequestMapping("/app")
@@ -70,6 +70,7 @@ public class AppController {
                                                        @RequestParam String message,
                                                        HttpServletRequest request) {
         UserAccount loginUser = userService.getLoginUser(request);
+        log.info("开始应用代码生成：appId={}, userId={}", appId, loginUser.getId());
         Flux<String> contentFlux = appService.chatToGenCode(appId, message, loginUser);
         return contentFlux
                 .map(this::chunkEvent)
@@ -182,6 +183,29 @@ public class AppController {
     public BaseResponse<java.util.List<ChatHistoryVO>> history(@RequestParam Long appId,
                                                                HttpServletRequest request) {
         return ResultUtils.success(appService.listChatHistory(appId, optionalLoginUser(request)));
+    }
+
+    @Operation(summary = "查看应用协作者")
+    @GetMapping("/collaborator/list")
+    public BaseResponse<java.util.List<AppCollaboratorVO>> listCollaborators(@RequestParam Long appId,
+                                                                              HttpServletRequest request) {
+        return ResultUtils.success(appService.listCollaborators(appId, userService.getLoginUser(request)));
+    }
+
+    @Operation(summary = "添加或更新应用协作者")
+    @PostMapping("/collaborator/add")
+    public BaseResponse<Boolean> addCollaborator(@Valid @RequestBody AppCollaboratorRequest collaboratorRequest,
+                                                  HttpServletRequest request) {
+        return ResultUtils.success(appService.addCollaborator(collaboratorRequest,
+                userService.getLoginUser(request)));
+    }
+
+    @Operation(summary = "移除应用协作者")
+    @PostMapping("/collaborator/remove")
+    public BaseResponse<Boolean> removeCollaborator(@Valid @RequestBody AppCollaboratorRequest collaboratorRequest,
+                                                     HttpServletRequest request) {
+        return ResultUtils.success(appService.removeCollaborator(collaboratorRequest,
+                userService.getLoginUser(request)));
     }
 
     @Operation(summary = "下载当前代码版本")

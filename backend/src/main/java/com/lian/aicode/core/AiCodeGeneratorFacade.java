@@ -1,44 +1,49 @@
 package com.lian.aicode.core;
 
 import com.lian.aicode.ai.AiCodeGeneratorService;
+import com.lian.aicode.ai.AiCodeGeneratorServiceFactory;
 import com.lian.aicode.core.parser.CodeParserExecutor;
 import com.lian.aicode.core.saver.CodeFileSaverExecutor;
 import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.model.enums.CodeGenTypeEnum;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
  * AI 代码生成门面：统一编排模型调用、流式收集、解析和固定文件落盘。
  *
- * <p>流式链路在所有片段完成后才执行解析和保存；保存失败会作为流错误传播，避免前端收到“完成”
- * 却拿不到文件。同步链路则直接返回已保存目录。</p>
+ * <p>应用生成会按 appId 选择隔离的 AI Service；没有配置 API Key 的开发环境仍可启动，
+ * 直到真正调用 AI 时才返回明确的配置错误。</p>
  */
 @Slf4j
 @Service
 public class AiCodeGeneratorFacade {
 
-    private final Supplier<AiCodeGeneratorService> aiServiceSupplier;
+    private final Supplier<AiCodeGeneratorService> defaultAiServiceSupplier;
+    private final ObjectProvider<AiCodeGeneratorServiceFactory> serviceFactoryProvider;
     private final CodeParserExecutor codeParserExecutor;
     private final CodeFileSaverExecutor codeFileSaverExecutor;
 
     /** Spring 使用该构造器；没有 API Key 时 provider 为空，但基础应用仍可启动。 */
     @Autowired
     public AiCodeGeneratorFacade(ObjectProvider<AiCodeGeneratorService> aiServiceProvider,
+                                 ObjectProvider<AiCodeGeneratorServiceFactory> serviceFactoryProvider,
                                  CodeParserExecutor codeParserExecutor,
                                  CodeFileSaverExecutor codeFileSaverExecutor) {
-        this.aiServiceSupplier = () -> aiServiceProvider.getIfAvailable(() -> {
+        this.defaultAiServiceSupplier = () -> aiServiceProvider.getIfAvailable(() -> {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR,
                     "AI 模型未配置，请设置 DEEPSEEK_API_KEY 并启用 local profile");
         });
+        this.serviceFactoryProvider = serviceFactoryProvider;
         this.codeParserExecutor = codeParserExecutor;
         this.codeFileSaverExecutor = codeFileSaverExecutor;
     }
@@ -47,49 +52,65 @@ public class AiCodeGeneratorFacade {
     public AiCodeGeneratorFacade(AiCodeGeneratorService aiCodeGeneratorService,
                                  CodeParserExecutor codeParserExecutor,
                                  CodeFileSaverExecutor codeFileSaverExecutor) {
-        this.aiServiceSupplier = () -> Objects.requireNonNull(aiCodeGeneratorService);
+        this.defaultAiServiceSupplier = () -> Objects.requireNonNull(aiCodeGeneratorService);
+        this.serviceFactoryProvider = null;
         this.codeParserExecutor = codeParserExecutor;
         this.codeFileSaverExecutor = codeFileSaverExecutor;
     }
 
     /** 根据类型同步生成并保存代码。 */
     public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenType) {
-        validateRequest(userMessage, codeGenType);
-        AiCodeGeneratorService service = aiServiceSupplier.get();
-        return switch (codeGenType) {
-            case HTML -> codeFileSaverExecutor.executeSaver(
-                    service.generateHtmlCode(userMessage), CodeGenTypeEnum.HTML);
-            case MULTI_FILE -> codeFileSaverExecutor.executeSaver(
-                    service.generateMultiFileCode(userMessage), CodeGenTypeEnum.MULTI_FILE);
-        };
+        return generateAndSaveCode(null, userMessage, codeGenType, null);
     }
 
     /** 为应用版本生成并保存到指定目录。 */
-    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenType, java.nio.file.Path outputDirectory) {
+    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenType, Path outputDirectory) {
+        return generateAndSaveCode(null, userMessage, codeGenType, outputDirectory);
+    }
+
+    /** 为指定应用选择隔离的 AI Service，同步生成并保存代码。 */
+    public File generateAndSaveCode(Long appId, String userMessage, CodeGenTypeEnum codeGenType,
+                                    Path outputDirectory) {
         validateRequest(userMessage, codeGenType);
-        AiCodeGeneratorService service = aiServiceSupplier.get();
+        AiCodeGeneratorService service = getService(appId);
         Object result = switch (codeGenType) {
             case HTML -> service.generateHtmlCode(userMessage);
             case MULTI_FILE -> service.generateMultiFileCode(userMessage);
         };
-        return codeFileSaverExecutor.executeSaver(result, codeGenType, outputDirectory);
+        return outputDirectory == null
+                ? codeFileSaverExecutor.executeSaver(result, codeGenType)
+                : codeFileSaverExecutor.executeSaver(result, codeGenType, outputDirectory);
     }
 
-    /**
-     * 根据类型生成并保存代码，同时把模型文本片段实时返回给调用方。
-     * 最后的保存动作不产生额外数据，只在成功或失败时结束该 Flux。
-     */
+    /** 根据类型生成并保存代码，同时把模型文本片段实时返回给调用方。 */
     public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenType) {
-        return generateAndSaveCodeStream(userMessage, codeGenType, null);
+        return generateAndSaveCodeStream(null, userMessage, codeGenType, null);
     }
 
     /** 为应用版本流式生成；outputDirectory 为空时保持基础阶段的随机目录行为。 */
     public Flux<String> generateAndSaveCodeStream(String userMessage,
                                                    CodeGenTypeEnum codeGenType,
-                                                   java.nio.file.Path outputDirectory) {
+                                                   Path outputDirectory) {
+        return generateAndSaveCodeStream(null, userMessage, codeGenType, outputDirectory);
+    }
+
+    /** 为指定应用使用隔离的 ChatMemory 流式生成。 */
+    public Flux<String> generateAndSaveCodeStream(Long appId,
+                                                   String userMessage,
+                                                   CodeGenTypeEnum codeGenType,
+                                                   Path outputDirectory) {
+        return generateAndSaveCodeStream(appId, userMessage, codeGenType, outputDirectory, null);
+    }
+
+    /** 为指定应用流式生成，并排除本轮已经落库的用户历史记录。 */
+    public Flux<String> generateAndSaveCodeStream(Long appId,
+                                                   String userMessage,
+                                                   CodeGenTypeEnum codeGenType,
+                                                   Path outputDirectory,
+                                                   Long excludedMessageId) {
         validateRequest(userMessage, codeGenType);
         return Flux.defer(() -> {
-            AiCodeGeneratorService service = aiServiceSupplier.get();
+            AiCodeGeneratorService service = getService(appId, excludedMessageId);
             Flux<String> codeStream = switch (codeGenType) {
                 case HTML -> service.generateHtmlCodeStream(userMessage);
                 case MULTI_FILE -> service.generateMultiFileCodeStream(userMessage);
@@ -101,15 +122,40 @@ public class AiCodeGeneratorFacade {
         });
     }
 
+    /** 应用删除或明确清空上下文时调用。 */
+    public void evictAppMemory(Long appId) {
+        if (serviceFactoryProvider == null) {
+            return;
+        }
+        AiCodeGeneratorServiceFactory factory = serviceFactoryProvider.getIfAvailable();
+        if (factory != null) {
+            try {
+                factory.evictAppService(appId);
+            } catch (RuntimeException exception) {
+                log.warn("清理应用 Redis AI 记忆失败，不影响应用删除：appId={}", appId, exception);
+            }
+        }
+    }
+
+    private AiCodeGeneratorService getService(Long appId) {
+        return getService(appId, null);
+    }
+
+    private AiCodeGeneratorService getService(Long appId, Long excludedMessageId) {
+        if (appId == null || appId <= 0 || serviceFactoryProvider == null) {
+            return defaultAiServiceSupplier.get();
+        }
+        AiCodeGeneratorServiceFactory factory = serviceFactoryProvider.getIfAvailable();
+        return factory == null ? defaultAiServiceSupplier.get() : factory.getForApp(appId, excludedMessageId);
+    }
+
     /**
      * 收集模型流式输出，最终解析并保存代码。
-     * @param codeStream
-     * @param codeGenType
-     * @return
+     * 保存动作放在 concatWith 中，只有上游完整结束后才会执行；保存失败会传播为 Flux 错误。
      */
     private Flux<String> processCodeStream(Flux<String> codeStream,
                                            CodeGenTypeEnum codeGenType,
-                                           java.nio.file.Path outputDirectory) {
+                                           Path outputDirectory) {
         StringBuilder codeBuilder = new StringBuilder();
         return codeStream
                 .doOnNext(chunk -> {
@@ -127,8 +173,8 @@ public class AiCodeGeneratorFacade {
                             codeGenType.getValue(), savedDirectory.getAbsolutePath());
                     return Flux.empty();
                 }))
-                .doOnError(error -> log.warn("代码生成或保存失败：type={}, reason={}",
-                        codeGenType.getValue(), error.getMessage()));
+                .doOnError(error -> log.warn("代码生成或保存失败：type={}, errorType={}",
+                        codeGenType.getValue(), error == null ? "未知异常" : error.getClass().getSimpleName()));
     }
 
     private void validateRequest(String userMessage, CodeGenTypeEnum codeGenType) {

@@ -63,6 +63,14 @@ public class App implements Serializable {
     @Column("current_version")
     private Integer currentVersion;
 
+    /** 实际已经切换到部署目录的版本；生成新版本后可以与 currentVersion 暂时不同。 */
+    @Column("deployed_version")
+    private Integer deployedVersion;
+
+    /** 用户发起的生成轮次；失败或取消的轮次也会计入，便于分析真实使用量。 */
+    @Column("conversation_rounds")
+    private Integer conversationRounds;
+
     @Column("generation_message")
     private String generationMessage;
 

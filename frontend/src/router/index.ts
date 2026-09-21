@@ -7,6 +7,7 @@ import AppDetailPage from '@/pages/AppDetailPage.vue'
 import AdminLayoutPage from '@/pages/AdminLayoutPage.vue'
 import AdminAppsPage from '@/pages/AdminAppsPage.vue'
 import AdminUsersPage from '@/pages/AdminUsersPage.vue'
+import AdminChatHistoryPage from '@/pages/AdminChatHistoryPage.vue'
 import { useUserStore } from '@/stores/user'
 
 const router = createRouter({
@@ -53,6 +54,12 @@ const router = createRouter({
           path: 'users',
           name: 'admin-users',
           component: AdminUsersPage,
+          meta: { requiresAdmin: true },
+        },
+        {
+          path: 'chats',
+          name: 'admin-chats',
+          component: AdminChatHistoryPage,
           meta: { requiresAdmin: true },
         },
       ],

@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
 import java.util.Comparator;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -130,6 +131,33 @@ public class AppStorageService {
     public void deleteDeployment(String deployKey) {
         if (deployKey != null && DEPLOY_KEY_PATTERN.matcher(deployKey).matches()) {
             deleteRecursively(deployDirectory(deployKey));
+        }
+    }
+
+    /**
+     * 返回受控版本目录下的相对文件名，用于对话审计和下载展示。
+     * 绝不把服务器绝对路径写入数据库；符号链接和越界路径也不会被纳入结果。
+     */
+    public List<String> listRelativeFiles(Path directory) {
+        Path normalized = directory == null ? null : directory.toAbsolutePath().normalize();
+        if (normalized == null || !normalized.startsWith(codeOutputRoot)
+                || !Files.isDirectory(normalized) || !isInsideRealRoot(codeOutputRoot, normalized)) {
+            return List.of();
+        }
+        try (var paths = Files.walk(normalized)) {
+            return paths
+                    .filter(Files::isRegularFile)
+                    .filter(path -> !Files.isSymbolicLink(path))
+                    .map(normalized::relativize)
+                    .map(Path::normalize)
+                    .filter(path -> !path.startsWith(".."))
+                    .map(path -> path.toString().replace('\\', '/'))
+                    .sorted()
+                    .limit(100)
+                    .toList();
+        } catch (IOException exception) {
+            log.warn("读取版本文件列表失败：directory={}", normalized, exception);
+            return List.of();
         }
     }
 

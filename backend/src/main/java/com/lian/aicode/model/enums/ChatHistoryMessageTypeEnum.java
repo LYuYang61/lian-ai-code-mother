@@ -7,7 +7,8 @@ import lombok.Getter;
 public enum ChatHistoryMessageTypeEnum {
 
     USER("user", "用户"),
-    AI("ai", "AI");
+    AI("ai", "AI"),
+    ERROR("error", "错误");
 
     private final String value;
     private final String text;

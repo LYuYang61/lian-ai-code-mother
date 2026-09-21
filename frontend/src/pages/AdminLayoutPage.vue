@@ -25,10 +25,15 @@ const router = useRouter()
 const menuItems: MenuProps['items'] = [
   { key: '/admin/apps', label: '应用运营管理', title: '应用运营管理' },
   { key: '/admin/users', label: '用户管理', title: '用户管理' },
+  { key: '/admin/chats', label: '对话历史', title: '对话历史' },
 ]
 
 // 子页面路径前缀一致（如 /admin/apps），用当前路径直接作为选中项即可。
-const activeKey = computed(() => (route.path.startsWith('/admin/users') ? '/admin/users' : '/admin/apps'))
+const activeKey = computed(() => {
+  if (route.path.startsWith('/admin/users')) return '/admin/users'
+  if (route.path.startsWith('/admin/chats')) return '/admin/chats'
+  return '/admin/apps'
+})
 
 const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
   const path = String(key)
