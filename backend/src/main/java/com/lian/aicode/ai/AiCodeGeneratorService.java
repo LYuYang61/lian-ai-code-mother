@@ -5,6 +5,8 @@ import com.lian.aicode.ai.model.MultiFileCodeResult;
 import com.lian.aicode.ai.model.AppNameResult;
 import com.lian.aicode.ai.model.ConversationSummaryResult;
 import dev.langchain4j.service.SystemMessage;
+import dev.langchain4j.service.MemoryId;
+import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import reactor.core.publisher.Flux;
 
@@ -42,4 +44,14 @@ public interface AiCodeGeneratorService {
     /** 生成三文件网页的文本流。 */
     @SystemMessage(fromResource = "prompt/codegen-multi-file-system-prompt.txt")
     Flux<String> generateMultiFileCodeStream(@UserMessage String userMessage);
+
+    /**
+     * 通过工具调用生成 Vue 工程。
+     *
+     * <p>memoryId 同时用于绑定应用级对话记忆，并由 LangChain4j 传给带有
+     * {@code @ToolMemoryId} 的工具参数。当前实现返回官方 TokenStream，以便统一转发
+     * AI 文本、思考摘要和工具生命周期事件。</p>
+     */
+    @SystemMessage(fromResource = "prompt/codegen-vue-project-system-prompt.txt")
+    TokenStream generateVueProjectCodeStream(@MemoryId Long appId, @UserMessage String userMessage);
 }

@@ -170,8 +170,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         boolean hasMore = queried.size() > safePageSize;
         List<ChatHistory> page = queried.stream().limit(safePageSize).toList();
         ChatHistory cursor = page.isEmpty() ? null : page.get(page.size() - 1);
-        log.info("查询应用对话历史：appId={}, pageSize={}, returned={}, hasMore={}",
-                appId, safePageSize, page.size(), hasMore);
+        log.info("查询应用对话历史：actor={}, appId={}, pageSize={}, returned={}, hasMore={}",
+                loginUser.getUserAccount(), appId, safePageSize, page.size(), hasMore);
         return CursorPageResult.<ChatHistoryVO>builder()
                 .records(attachUsers(page.stream().map(this::toVO).toList()))
                 .hasMore(hasMore)
@@ -215,7 +215,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
                 query.orderBy(sortColumn, ascending).orderBy("create_time", true));
         long total = page.getTotalRow();
         long pages = total == 0 ? 0 : (total + pageSize - 1) / pageSize;
-        log.info("管理员查询对话历史：pageNum={}, pageSize={}, total={}", pageNum, pageSize, total);
+        log.info("管理员查询对话历史：actor={}, pageNum={}, pageSize={}, total={}",
+                loginUser.getUserAccount(), pageNum, pageSize, total);
         return new PageResult<>(attachAppNames(attachUsers(page.getRecords().stream().map(this::toVO).toList())),
                 pageNum, pageSize, total, pages);
     }
@@ -235,7 +236,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         if (result) {
             refreshChatMemory(history.getAppId());
         }
-        log.warn("管理员删除对话历史：id={}, appId={}, success={}", id, history.getAppId(), result);
+        log.info("管理员删除对话历史：actor={}, id={}, appId={}, result={}", loginUser.getUserAccount(), id,
+                history.getAppId(), result ? "成功" : "失败");
         return result;
     }
 
@@ -343,7 +345,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
                     .append(record.getCreateTime() == null ? "" : record.getCreateTime()).append("\n\n")
                     .append(record.getMessage()).append("\n\n");
         }
-        log.info("导出应用对话历史：appId={}, count={}", appId, records.size());
+        log.info("导出应用对话历史：actor={}, appId={}, count={}", loginUser.getUserAccount(), appId,
+                records.size());
         return markdown.toString().getBytes(StandardCharsets.UTF_8);
     }
 
@@ -352,6 +355,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         App app = requireApp(appId);
         requireHistoryAccess(app, loginUser);
         if (!collaboratorService.canEdit(app, loginUser) && !userService.isAdmin(loginUser)) {
+            log.warn("生成对话摘要权限校验失败：actor={}, appId={}, result=拒绝",
+                    loginUser.getUserAccount(), appId);
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有创建者、编辑协作者或管理员可以生成摘要");
         }
         if (generationTaskManager.isGenerating(appId)) {
@@ -361,7 +366,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         if (aiService == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 模型未配置，无法生成对话摘要");
         }
-        return withSummaryLock(appId, () -> summarizeInternal(appId, aiService));
+        return withSummaryLock(appId,
+                () -> summarizeInternal(appId, aiService, loginUser.getUserAccount()));
     }
 
     @Override
@@ -388,7 +394,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         try {
             summaryExecutor.execute(() -> {
                 try {
-                    withSummaryLock(appId, () -> summarizeInternal(appId, aiService));
+                    withSummaryLock(appId, () -> summarizeInternal(appId, aiService, "system"));
                     log.info("异步更新应用对话摘要完成：appId={}, messageCount={}", appId, messageCount);
                 } catch (RuntimeException exception) {
                     // 摘要是优化项，失败不能回滚已经成功的代码生成和历史记录。
@@ -405,7 +411,22 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         }
     }
 
-    private ChatSummaryVO summarizeInternal(Long appId, AiCodeGeneratorService aiService) {
+    private ChatSummaryVO summarizeInternal(Long appId, AiCodeGeneratorService aiService, String actorAccount) {
+        long startedAt = System.nanoTime();
+        log.info("AI 对话摘要开始：actor={}, appId={}", actorAccount, appId);
+        try {
+            ChatSummaryVO result = summarizeInternalCore(appId, aiService);
+            log.info("AI 对话摘要结束：actor={}, appId={}, result=成功, durationMs={}", actorAccount, appId,
+                    elapsedMillis(startedAt));
+            return result;
+        } catch (RuntimeException exception) {
+            log.warn("AI 对话摘要结束：actor={}, appId={}, result=失败, reason={}, durationMs={}", actorAccount,
+                    appId, exception.getClass().getSimpleName(), elapsedMillis(startedAt));
+            throw exception;
+        }
+    }
+
+    private ChatSummaryVO summarizeInternalCore(Long appId, AiCodeGeneratorService aiService) {
         requireApp(appId);
         List<ChatHistory> records = chatHistoryMapper.selectListByQuery(QueryWrapper.create()
                 .eq("app_id", appId).orderBy("create_time", false).orderBy("id", false)
@@ -549,9 +570,12 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
 
     private void requireHistoryAccess(App app, UserAccount user) {
         if (user == null) {
+            log.warn("对话历史权限校验失败：actor=<anonymous>, appId={}, result=未登录", app.getId());
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR, "请先登录后查看对话历史");
         }
         if (!collaboratorService.canView(app, user)) {
+            log.warn("对话历史权限校验失败：actor={}, appId={}, result=拒绝",
+                    user.getUserAccount(), app.getId());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权查看该应用的对话历史");
         }
     }
@@ -561,8 +585,13 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR, "请先登录");
         }
         if (!userService.isAdmin(user)) {
+            log.warn("对话历史管理员权限校验失败：actor={}, result=拒绝", user.getUserAccount());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "需要管理员权限");
         }
+    }
+
+    private long elapsedMillis(long startedAt) {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
     }
 
     /** 批量回填消息所属应用名称，管理后台用它替代长 appId 展示。 */

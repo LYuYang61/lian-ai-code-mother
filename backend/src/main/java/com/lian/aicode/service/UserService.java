@@ -43,7 +43,7 @@ public interface UserService {
 
     PageResult<UserVO> listUsers(UserQueryRequest request);
 
-    boolean adminUpdate(UserAdminUpdateRequest request);
+    boolean adminUpdate(UserAdminUpdateRequest request, UserAccount operator);
 
-    boolean deleteUser(Long id);
+    boolean deleteUser(Long id, UserAccount operator);
 }

@@ -68,6 +68,8 @@ public class AppCollaboratorServiceImpl implements AppCollaboratorService {
     public List<AppCollaboratorVO> list(Long appId, UserAccount operator) {
         App app = requireApp(appId);
         if (!canView(app, operator)) {
+            log.warn("协作者列表权限校验失败：actor={}, appId={}, result=拒绝",
+                    operator == null ? "<anonymous>" : operator.getUserAccount(), appId);
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权查看应用协作者");
         }
         List<AppCollaborator> collaborators = collaboratorMapper.selectListByQuery(
@@ -152,8 +154,11 @@ public class AppCollaboratorServiceImpl implements AppCollaboratorService {
             existing.setRole(role.getValue());
             existing.setInvitedBy(operator.getId());
             existing.setUpdateTime(now);
-            log.info("更新应用协作者：appId={}, userId={}, role={}", app.getId(), targetUserId, role.getValue());
-            return collaboratorMapper.update(existing) > 0;
+            boolean result = collaboratorMapper.update(existing) > 0;
+            log.info("更新应用协作者：actor={}, appId={}, targetUserId={}, role={}, result={}",
+                    operator.getUserAccount(), app.getId(), targetUserId, role.getValue(),
+                    result ? "成功" : "失败");
+            return result;
         }
         long memberCount = collaboratorMapper.selectCountByQuery(
                 QueryWrapper.create().eq("app_id", app.getId()));
@@ -165,12 +170,14 @@ public class AppCollaboratorServiceImpl implements AppCollaboratorService {
                 .invitedBy(operator.getId()).createTime(now).updateTime(now).isDelete(0).build();
         try {
             boolean result = collaboratorMapper.insert(collaborator) > 0;
-            log.info("添加应用协作者：appId={}, userId={}, role={}, success={}",
-                    app.getId(), targetUserId, role.getValue(), result);
+            log.info("应用协作者权限变更：actor={}, appId={}, targetUserId={}, role={}, result={}",
+                    operator.getUserAccount(), app.getId(), targetUserId, role.getValue(),
+                    result ? "成功" : "失败");
             return result;
         } catch (DuplicateKeyException exception) {
             // 并发邀请同一用户时，数据库唯一键是最终防线；向调用方返回可理解的业务错误。
-            log.warn("添加应用协作者发生重复：appId={}, userId={}", app.getId(), targetUserId);
+            log.warn("添加应用协作者发生重复：actor={}, appId={}, targetUserId={}",
+                    operator.getUserAccount(), app.getId(), targetUserId);
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "该用户已经是应用协作者，请刷新后重试", exception);
         }
     }
@@ -185,10 +192,14 @@ public class AppCollaboratorServiceImpl implements AppCollaboratorService {
         requireOwnerOrAdmin(app, operator);
         AppCollaborator collaborator = findActive(app.getId(), request.getUserId());
         if (collaborator == null) {
+            log.info("移除应用协作者：actor={}, appId={}, targetUserId={}, result=不存在",
+                    operator.getUserAccount(), app.getId(), request.getUserId());
             return false;
         }
         boolean result = collaboratorMapper.deleteById(collaborator.getId()) > 0;
-        log.info("移除应用协作者：appId={}, userId={}, success={}", app.getId(), request.getUserId(), result);
+        log.info("应用协作者权限变更：actor={}, appId={}, targetUserId={}, role={}, result={}",
+                operator.getUserAccount(), app.getId(), request.getUserId(), collaborator.getRole(),
+                result ? "移除成功" : "移除失败");
         return result;
     }
 
@@ -224,6 +235,8 @@ public class AppCollaboratorServiceImpl implements AppCollaboratorService {
 
     private void requireOwnerOrAdmin(App app, UserAccount user) {
         if (!isOwnerOrAdmin(app, user)) {
+            log.warn("协作者管理权限校验失败：actor={}, appId={}, result=拒绝",
+                    user == null ? "<anonymous>" : user.getUserAccount(), app.getId());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者或管理员可以管理协作者");
         }
     }

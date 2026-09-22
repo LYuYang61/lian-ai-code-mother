@@ -51,6 +51,8 @@ public class CodeFileSaverExecutor {
                 }
                 yield multiFileCodeFileSaver.saveCode(result);
             }
+            case VUE_PROJECT -> throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                    "Vue 工程由文件工具直接写入，不能使用结构化保存器");
         };
     }
 
@@ -72,6 +74,8 @@ public class CodeFileSaverExecutor {
                 }
                 yield multiFileCodeFileSaver.saveCode(result, targetDirectory);
             }
+            case VUE_PROJECT -> throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                    "Vue 工程由文件工具直接写入，不能使用结构化保存器");
         };
     }
 }

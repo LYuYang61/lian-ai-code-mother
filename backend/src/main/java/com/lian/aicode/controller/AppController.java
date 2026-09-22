@@ -45,10 +45,15 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -70,7 +75,7 @@ public class AppController {
                                                        @RequestParam String message,
                                                        HttpServletRequest request) {
         UserAccount loginUser = userService.getLoginUser(request);
-        log.info("开始应用代码生成：appId={}, userId={}", appId, loginUser.getId());
+        log.info("开始应用代码生成接口：actor={}, appId={}", loginUser.getUserAccount(), appId);
         Flux<String> contentFlux = appService.chatToGenCode(appId, message, loginUser);
         return contentFlux
                 .map(this::chunkEvent)
@@ -221,12 +226,15 @@ public class AppController {
     public void download(@RequestParam Long appId,
                          HttpServletRequest request,
                          HttpServletResponse response) {
-        Path directory = appService.getDownloadPath(appId, userService.getLoginUser(request));
+        UserAccount loginUser = userService.getLoginUser(request);
+        Path directory = appService.getDownloadPath(appId, loginUser);
         try {
             response.setContentType("application/zip");
             response.setHeader("Content-Disposition", ContentDisposition.attachment()
                     .filename("app-" + appId + ".zip", StandardCharsets.UTF_8).build().toString());
             writeZip(directory, response);
+            log.info("下载应用代码完成：actor={}, appId={}, result=成功",
+                    loginUser.getUserAccount(), appId);
         } catch (IOException exception) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "下载代码失败", exception);
         }
@@ -244,8 +252,8 @@ public class AppController {
     @PostMapping("/admin/update")
     public BaseResponse<Boolean> adminUpdate(@Valid @RequestBody AppAdminUpdateRequest request,
                                              HttpServletRequest httpRequest) {
-        requireAdmin(httpRequest);
-        return ResultUtils.success(appService.adminUpdateApp(request));
+        UserAccount admin = requireAdmin(httpRequest);
+        return ResultUtils.success(appService.adminUpdateApp(request, admin));
     }
 
     @Operation(summary = "管理员查看应用详情")
@@ -266,6 +274,7 @@ public class AppController {
     private UserAccount requireAdmin(HttpServletRequest request) {
         UserAccount user = userService.getLoginUser(request);
         if (!userService.isAdmin(user)) {
+            log.warn("管理员权限校验失败：actor={}, result=拒绝", user.getUserAccount());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "需要管理员权限");
         }
         return user;
@@ -283,12 +292,31 @@ public class AppController {
     }
 
     private ServerSentEvent<String> chunkEvent(String chunk) {
+        if (isStructuredStreamMessage(chunk)) {
+            return ServerSentEvent.<String>builder().data(chunk).build();
+        }
         try {
             return ServerSentEvent.<String>builder()
                     .data(objectMapper.writeValueAsString(Map.of("d", chunk == null ? "" : chunk)))
                     .build();
         } catch (JsonProcessingException exception) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "SSE 数据编码失败", exception);
+        }
+    }
+
+    /** Vue 工程模式已经输出统一 JSON 消息，不能再次包成旧版 {d: ...}。 */
+    private boolean isStructuredStreamMessage(String chunk) {
+        if (chunk == null || chunk.isBlank()) {
+            return false;
+        }
+        try {
+            var node = objectMapper.readTree(chunk);
+            String type = node == null ? null : node.path("type").asText(null);
+            return node != null && node.isObject() && type != null
+                    && Set.of("ai_response", "thinking", "tool_request", "tool_executed")
+                    .contains(type.toLowerCase(Locale.ROOT));
+        } catch (JsonProcessingException ignored) {
+            return false;
         }
     }
 
@@ -319,19 +347,57 @@ public class AppController {
         if (!Files.isDirectory(directory)) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "代码目录不存在");
         }
-        try (ZipOutputStream zip = new ZipOutputStream(response.getOutputStream(), StandardCharsets.UTF_8);
-             var paths = Files.walk(directory)) {
-            for (Path path : paths.filter(Files::isRegularFile)
-                    .filter(path -> !Files.isSymbolicLink(path)).toList()) {
-                Path relative = directory.relativize(path).normalize();
-                if (relative.startsWith("..")) {
-                    throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "非法下载路径");
+        try (ZipOutputStream zip = new ZipOutputStream(response.getOutputStream(), StandardCharsets.UTF_8)) {
+            Files.walkFileTree(directory, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    return !dir.equals(directory) && isBuildArtifact(dir, directory)
+                            ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
                 }
-                zip.putNextEntry(new ZipEntry(relative.toString().replace('\\', '/')));
-                Files.copy(path, zip);
-                zip.closeEntry();
-            }
+
+                @Override
+                public FileVisitResult visitFile(Path path, BasicFileAttributes attrs) throws IOException {
+                    if (Files.isRegularFile(path) && !Files.isSymbolicLink(path)) {
+                        Path relative = directory.relativize(path).normalize();
+                        if (relative.startsWith("..")) {
+                            throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "非法下载路径");
+                        }
+                        if (isSensitiveProjectPath(relative)) {
+                            return FileVisitResult.CONTINUE;
+                        }
+                        zip.putNextEntry(new ZipEntry(relative.toString().replace('\\', '/')));
+                        Files.copy(path, zip);
+                        zip.closeEntry();
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
             zip.finish();
         }
+    }
+
+    private boolean isBuildArtifact(Path path, Path root) {
+        Path relative = root.relativize(path).normalize();
+        for (Path segment : relative) {
+            String name = segment.toString().toLowerCase(Locale.ROOT);
+            if (Set.of("node_modules", "dist", "build", "target", ".git", ".idea", ".vscode", ".mvn")
+                    .contains(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isSensitiveProjectPath(Path relative) {
+        for (Path segment : relative) {
+            String name = segment.toString().toLowerCase(Locale.ROOT);
+            if (name.equals(".env") || name.startsWith(".env.") || name.equals(".npmrc")
+                    || name.equals(".yarnrc") || name.equals(".yarnrc.yml")
+                    || name.equals("id_rsa") || name.equals("secrets") || name.equals("credentials")
+                    || name.endsWith(".pem") || name.endsWith(".key")) {
+                return true;
+            }
+        }
+        return false;
     }
 }

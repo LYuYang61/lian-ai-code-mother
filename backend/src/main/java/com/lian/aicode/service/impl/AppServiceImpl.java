@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lian.aicode.ai.AiCodeGeneratorService;
 import com.lian.aicode.ai.model.AppNameResult;
 import com.lian.aicode.core.AiCodeGeneratorFacade;
+import com.lian.aicode.core.builder.VueProjectBuilder;
+import com.lian.aicode.core.stream.StreamMessageHistoryFormatter;
 import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.mapper.AppMapper;
@@ -101,6 +103,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     private final ObjectMapper objectMapper;
     private final AppStorageService storageService;
     private final GenerationTaskManager taskManager;
+    private final StreamMessageHistoryFormatter streamMessageHistoryFormatter;
+    private final VueProjectBuilder vueProjectBuilder;
 
     @Value("${app.storage.max-prompt-length:10000}")
     private int maxPromptLength;
@@ -120,7 +124,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
 
         App app = new App();
         // 应用命名是外部模型调用，不能放在数据库事务里持有连接；创建阶段只有一条应用记录写入。
-        app.setAppName(generateAppName(prompt));
+        app.setAppName(generateAppName(prompt, loginUser.getUserAccount()));
         app.setInitPrompt(prompt);
         app.setCodeGenType(codeGenType.getValue());
         app.setUserId(loginUser.getId());
@@ -138,8 +142,11 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         app.setEditTime(app.getCreateTime());
         app.setIsDelete(0);
         if (!save(app)) {
+            log.error("创建应用失败：actor={}, type={}, result=失败", loginUser.getUserAccount(), codeGenType.getValue());
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "创建应用失败");
         }
+        log.info("创建应用成功：actor={}, appId={}, type={}, visibility={}, result=成功",
+                loginUser.getUserAccount(), app.getId(), codeGenType.getValue(), visibility);
         return app.getId();
     }
 
@@ -219,12 +226,15 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         }
         update.setEditTime(LocalDateTime.now());
         update.setUpdateTime(update.getEditTime());
-        return updateById(update);
+        boolean result = updateById(update);
+        log.info("更新应用资料：actor={}, appId={}, result={}", loginUser.getUserAccount(), app.getId(),
+                result ? "成功" : "失败");
+        return result;
     }
 
     @Override
     @Transactional
-    public boolean adminUpdateApp(AppAdminUpdateRequest request) {
+    public boolean adminUpdateApp(AppAdminUpdateRequest request, UserAccount operator) {
         App app = requireApp(request.getId());
         App update = new App();
         update.setId(app.getId());
@@ -281,7 +291,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         }
         update.setEditTime(LocalDateTime.now());
         update.setUpdateTime(update.getEditTime());
-        return updateById(update);
+        boolean result = updateById(update);
+        log.info("管理员更新应用运营字段：actor={}, appId={}, featuredStatus={}, priority={}, result={}",
+                operator == null ? "<unknown>" : operator.getUserAccount(), app.getId(),
+                request.getFeaturedStatus(), request.getPriority(), result ? "成功" : "失败");
+        if (request.getFeaturedStatus() != null) {
+            log.info("应用精选状态流转：actor={}, appId={}, from={}, to={}, result={}",
+                    operator == null ? "<unknown>" : operator.getUserAccount(), app.getId(),
+                    app.getFeaturedStatus(), request.getFeaturedStatus(), result ? "成功" : "失败");
+        }
+        return result;
     }
 
     @Override
@@ -290,16 +309,34 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
-        taskManager.cancel(appId);
-        deleteRelatedData(appId);
-        chatHistoryService.deleteByAppId(appId);
-        collaboratorService.deleteByAppId(appId);
-        boolean removed = removeById(appId);
-        if (removed) {
-            // 数据库事务回滚时不能提前删除 Redis 记忆和磁盘文件；提交成功后再做外部资源清理。
-            registerDeleteCleanup(appId, app.getDeployKey());
+        if (!taskManager.beginDelete(appId)) {
+            log.warn("删除应用被拒绝：actor={}, appId={}, result=生成任务进行中", loginUser.getUserAccount(), appId);
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "应用正在生成，请先停止并等待生成任务结束后再删除");
         }
-        return removed;
+        boolean deleteGuardRegistered = false;
+        try {
+            log.info("删除应用开始：actor={}, appId={}, result=处理中", loginUser.getUserAccount(), appId);
+            deleteRelatedData(appId);
+            chatHistoryService.deleteByAppId(appId);
+            collaboratorService.deleteByAppId(appId);
+            boolean removed = removeById(appId);
+            if (removed) {
+                // 数据库事务回滚时不能提前删除 Redis 记忆和磁盘文件；提交成功后再做外部资源清理。
+                registerDeleteGuardRelease(appId);
+                deleteGuardRegistered = true;
+                registerDeleteCleanup(appId, app.getDeployKey(), loginUser.getUserAccount());
+            } else {
+                taskManager.finishDelete(appId);
+            }
+            log.info("删除应用完成：actor={}, appId={}, result={}", loginUser.getUserAccount(), appId,
+                    removed ? "成功" : "失败");
+            return removed;
+        } catch (RuntimeException exception) {
+            if (!deleteGuardRegistered) {
+                taskManager.finishDelete(appId);
+            }
+            throw exception;
+        }
     }
 
     @Override
@@ -307,6 +344,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(appId);
         if (!collaboratorService.canEdit(app, loginUser)) {
+            log.warn("生成权限校验失败：actor={}, appId={}, result=拒绝",
+                    loginUser.getUserAccount(), appId);
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者或编辑协作者可以生成代码");
         }
         if (message == null || message.isBlank()) {
@@ -318,37 +357,56 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "应用代码生成类型无效");
         }
 
-        GenerationTaskManager.GenerationTask task = taskManager.start(appId);
-        AppVersion version;
+        long startedAt = System.nanoTime();
+        log.info("应用生成任务开始：actor={}, appId={}, type={}, promptLength={}",
+                loginUser.getUserAccount(), appId, codeGenType.getValue(), prompt.length());
+
+        GenerationTaskManager.GenerationTask task;
+        try {
+            task = taskManager.start(appId);
+        } catch (RuntimeException exception) {
+            log.warn("应用生成任务启动失败：actor={}, appId={}, result=拒绝, reason={}",
+                    loginUser.getUserAccount(), appId, exception.getClass().getSimpleName());
+            throw exception;
+        }
+        AppVersion reservedVersion = null;
         com.lian.aicode.model.entity.ChatHistory userHistory;
         try {
-            version = reserveVersion(app, prompt, codeGenType, loginUser.getId());
+            reservedVersion = reserveVersion(app, prompt, codeGenType, loginUser.getId(), loginUser.getUserAccount());
             try {
+                prepareVersionSource(app, reservedVersion, codeGenType, loginUser.getUserAccount());
                 userHistory = chatHistoryService.addMessage(appId, loginUser.getId(), prompt,
-                        ChatHistoryMessageTypeEnum.USER, null, version.getVersionNo(), null);
+                        ChatHistoryMessageTypeEnum.USER, null, reservedVersion.getVersionNo(), null);
                 if (mapper.incrementConversationRounds(appId) <= 0) {
                     throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新对话轮次失败");
                 }
             } catch (RuntimeException exception) {
                 // 版本已预留但用户消息写入失败时不能留下“永远生成中”的孤儿任务。
-                markGenerationFailed(appId, version, null, exception);
+                markGenerationFailed(appId, reservedVersion, null, loginUser.getUserAccount(), exception);
                 throw exception;
             }
         } catch (RuntimeException exception) {
             taskManager.finish(appId, task);
+            log.warn("应用生成任务初始化失败：actor={}, appId={}, version={}, reason={}",
+                    loginUser.getUserAccount(), appId,
+                    reservedVersion == null ? null : reservedVersion.getVersionNo(), exception.getClass().getSimpleName());
             throw exception;
         }
 
+        final AppVersion version = reservedVersion;
+        Path versionDirectory = storageService.resolveVersionPath(version.getRelativePath());
         StringBuilder aiMessage = new StringBuilder();
         AtomicBoolean sourceCompleted = new AtomicBoolean(false);
         AtomicBoolean stateMarked = new AtomicBoolean(false);
         Flux<String> source = aiCodeGeneratorFacade.generateAndSaveCodeStream(
                         appId, prompt, codeGenType,
-                        storageService.versionDirectory(appId, version.getVersionNo()), userHistory.getId())
+                        versionDirectory, userHistory.getId(),
+                        version.getVersionNo(), loginUser.getUserAccount())
                 .doOnNext(chunk -> {
-                    if (chunk != null && aiMessage.length() < MAX_CHAT_HISTORY_MESSAGE_LENGTH) {
+                    String historyChunk = streamMessageHistoryFormatter.toHistoryText(chunk);
+                    if (!historyChunk.isBlank() && aiMessage.length() < MAX_CHAT_HISTORY_MESSAGE_LENGTH) {
                         int remaining = MAX_CHAT_HISTORY_MESSAGE_LENGTH - aiMessage.length();
-                        aiMessage.append(chunk, 0, Math.min(chunk.length(), remaining));
+                        aiMessage.append(historyChunk, 0, Math.min(historyChunk.length(), remaining));
                     }
                 })
                 // 门面只有在解析和保存成功后才完成，因此这里是“可用版本”的唯一完成信号。
@@ -361,14 +419,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                         try {
                             // 上游已经完整结束时，停止请求只能算“来晚了”，不能把可用版本改成取消态。
                             if (sourceCompleted.get()) {
-                                markGenerationReady(appId, version, userHistory.getId(), aiMessage.toString());
+                                markGenerationReady(appId, version, userHistory.getId(), loginUser.getUserAccount(),
+                                        aiMessage.toString());
                             } else {
-                                markGenerationCancelled(appId, version, userHistory.getId());
+                                markGenerationCancelled(appId, version, userHistory.getId(), loginUser.getUserAccount());
                             }
                         } catch (RuntimeException completionError) {
                             // 终态收口失败时，不能因为 stateMarked 已置位而遗留 generating 孤儿版本。
                             try {
-                                markGenerationFailed(appId, version, userHistory.getId(), completionError);
+                                markGenerationFailed(appId, version, userHistory.getId(), loginUser.getUserAccount(),
+                                        completionError);
                             } catch (RuntimeException stateError) {
                                 log.error("生成终态收口失败：appId={}, version={}", appId, version.getVersionNo(), stateError);
                             }
@@ -381,16 +441,40 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                         ? Flux.error(new GenerationCancelledException()) : Flux.empty()))
                 .doOnError(error -> {
                     if (stateMarked.compareAndSet(false, true)) {
-                        markGenerationFailed(appId, version, userHistory.getId(), error);
+                        markGenerationFailed(appId, version, userHistory.getId(), loginUser.getUserAccount(), error);
                     }
                 })
                 .doFinally(signal -> {
                     // 浏览器断开 SSE 时，上游收到 cancel，不会触发 doOnComplete；仍需收口数据库状态。
                     if (signal == SignalType.CANCEL && stateMarked.compareAndSet(false, true)) {
-                        markGenerationCancelled(appId, version, userHistory.getId());
+                        markGenerationCancelled(appId, version, userHistory.getId(), loginUser.getUserAccount());
                     }
+                    log.info("应用生成任务结束：actor={}, appId={}, version={}, signal={}, durationMs={}",
+                            loginUser.getUserAccount(), appId, version.getVersionNo(), signal,
+                            elapsedMillis(startedAt));
                     taskManager.finish(appId, task);
                 });
+    }
+
+    /**
+     * Vue 版本迭代以当前可用版本为基线；第一版由模板服务初始化，后续版本只继承受控源文件。
+     */
+    private void prepareVersionSource(App app, AppVersion version, CodeGenTypeEnum type, String actorAccount) {
+        if (type != CodeGenTypeEnum.VUE_PROJECT || app.getCurrentVersion() == null || app.getCurrentVersion() <= 0) {
+            return;
+        }
+        AppVersion baseVersion = appVersionMapper.selectOneByQuery(QueryWrapper.create()
+                .eq("app_id", app.getId())
+                .eq("version_no", app.getCurrentVersion())
+                .eq("status", AppVersionStatusEnum.READY.getValue()));
+        if (baseVersion == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "当前 Vue 基线版本不存在");
+        }
+        Path source = storageService.resolveVersionPath(baseVersion.getRelativePath());
+        Path target = storageService.resolveVersionPath(version.getRelativePath());
+        log.info("准备 Vue 版本迭代：actor={}, appId={}, fromVersion={}, toVersion={}",
+                actorAccount, app.getId(), baseVersion.getVersionNo(), version.getVersionNo());
+        storageService.copyProjectSource(source, target);
     }
 
     @Override
@@ -398,9 +482,13 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(appId);
         if (!collaboratorService.canEdit(app, loginUser)) {
+            log.warn("停止生成权限校验失败：actor={}, appId={}, result=拒绝", loginUser.getUserAccount(), appId);
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者或编辑协作者可以停止生成");
         }
-        return taskManager.cancel(appId);
+        boolean result = taskManager.cancel(appId);
+        log.info("停止应用生成：actor={}, appId={}, result={}", loginUser.getUserAccount(), appId,
+                result ? "成功" : "无进行中任务");
+        return result;
     }
 
     @Override
@@ -409,13 +497,15 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
-        return deployReadyVersion(appId, app);
+        return deployReadyVersion(appId, app, loginUser.getUserAccount());
     }
 
     /** 执行部署文件切换并保存数据库状态；调用方必须已经完成权限校验。 */
-    private String deployReadyVersion(Long appId, App app) {
+    private String deployReadyVersion(Long appId, App app, String actorAccount) {
         AppVersion version = requireReadyVersion(appId, app.getCurrentVersion());
-        Path sourceDirectory = storageService.resolveVersionPath(version.getRelativePath());
+        Path sourceDirectory = resolveRuntimeDirectory(version);
+        log.info("应用部署开始：actor={}, appId={}, version={}, previousStatus={}", actorAccount, appId,
+                version.getVersionNo(), app.getDeploymentStatus());
         String deployKey = StringUtils.hasText(app.getDeployKey()) ? app.getDeployKey() : generateDeployKey();
         String oldDeployKey = app.getDeployKey();
         // currentVersion 是用户当前选中的版本，不一定是部署目录正在提供的版本。
@@ -436,10 +526,14 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             if (!updateById(update)) {
                 throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存部署状态失败");
             }
+            log.info("部署状态流转：actor={}, appId={}, version={}, from={}, to=deployed, result=成功",
+                    actorAccount, appId, version.getVersionNo(), app.getDeploymentStatus());
         } catch (RuntimeException exception) {
             if (fileSwitched) {
                 restoreDeploymentAfterDatabaseFailure(appId, oldDeployKey, oldVersionNo, deployKey);
             }
+            log.warn("应用部署失败：actor={}, appId={}, version={}, reason={}", actorAccount, appId,
+                    version.getVersionNo(), exception.getClass().getSimpleName());
             throw exception;
         }
         return buildDeployUrl(deployKey);
@@ -451,13 +545,18 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
         if (!AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus())) {
+            log.info("暂停部署跳过：actor={}, appId={}, previousStatus={}, result=无需操作",
+                    loginUser.getUserAccount(), appId, app.getDeploymentStatus());
             return false;
         }
         App update = new App();
         update.setId(appId);
         update.setDeploymentStatus(AppDeploymentStatusEnum.PAUSED.getValue());
         update.setUpdateTime(LocalDateTime.now());
-        return updateById(update);
+        boolean result = updateById(update);
+        log.info("部署状态流转：actor={}, appId={}, from=deployed, to=paused, result={}",
+                loginUser.getUserAccount(), appId, result ? "成功" : "失败");
+        return result;
     }
 
     @Override
@@ -466,7 +565,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
-        return deployReadyVersion(appId, app);
+        return deployReadyVersion(appId, app, loginUser.getUserAccount());
     }
 
     @Override
@@ -493,6 +592,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         App app = requireApp(appId);
         assertOwnerOrAdmin(app, loginUser);
         AppVersion targetVersion = requireReadyVersion(appId, versionNo);
+        log.info("应用版本回滚开始：actor={}, appId={}, fromVersion={}, toVersion={}",
+                loginUser.getUserAccount(), appId, app.getCurrentVersion(), versionNo);
         Integer oldVersionNo = app.getDeployedVersion() == null
                 ? app.getCurrentVersion() : app.getDeployedVersion();
         // 如果当前应用已在线，回滚必须同步替换部署目录，否则数据库显示的当前版本和线上内容会不一致。
@@ -500,7 +601,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             if (!StringUtils.hasText(app.getDeployKey())) {
                 throw new BusinessException(ErrorCode.OPERATION_ERROR, "部署状态异常，缺少部署标识");
             }
-            storageService.deploy(storageService.resolveVersionPath(targetVersion.getRelativePath()), app.getDeployKey());
+            storageService.deploy(resolveRuntimeDirectory(targetVersion), app.getDeployKey());
         }
         App update = new App();
         update.setId(appId);
@@ -515,11 +616,15 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             if (!updateById(update)) {
                 throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存回滚状态失败");
             }
+            log.info("版本状态流转：actor={}, appId={}, currentVersion={}, deployedVersion={}, result=回滚成功",
+                    loginUser.getUserAccount(), appId, versionNo, update.getDeployedVersion());
             return true;
         } catch (RuntimeException exception) {
             if (AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus())) {
                 restoreDeploymentAfterDatabaseFailure(appId, app.getDeployKey(), oldVersionNo, app.getDeployKey());
             }
+            log.warn("应用版本回滚失败：actor={}, appId={}, toVersion={}, reason={}",
+                    loginUser.getUserAccount(), appId, versionNo, exception.getClass().getSimpleName());
             throw exception;
         }
     }
@@ -529,6 +634,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         App app = requireApp(appId);
         assertReadable(app, loginUser);
         if (!canManage(app, loginUser) && !collaboratorService.canEdit(app, loginUser)) {
+            log.warn("版本比较权限校验失败：actor={}, appId={}, result=拒绝",
+                    loginUser == null ? "<anonymous>" : loginUser.getUserAccount(), appId);
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者、编辑协作者或管理员可以比较历史版本");
         }
         AppVersion from = requireReadyVersion(appId, fromVersion);
@@ -584,6 +691,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         requireLogin(loginUser);
         App app = requireApp(request.getAppId());
         if (!app.getUserId().equals(loginUser.getId())) {
+            log.warn("申请精选权限校验失败：actor={}, appId={}, result=拒绝",
+                    loginUser.getUserAccount(), request.getAppId());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只能申请自己的应用");
         }
         if (!AppVisibilityEnum.PUBLIC.getValue().equals(app.getVisibility())
@@ -596,7 +705,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         update.setFeaturedStatus(AppFeaturedStatusEnum.PENDING.getValue());
         update.setFeaturedReason(trimToNull(request.getReason()));
         update.setUpdateTime(LocalDateTime.now());
-        return updateById(update);
+        boolean result = updateById(update);
+        log.info("应用精选状态流转：actor={}, appId={}, from={}, to=pending, result={}",
+                loginUser.getUserAccount(), app.getId(), app.getFeaturedStatus(), result ? "成功" : "失败");
+        return result;
     }
 
     @Override
@@ -616,7 +728,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "公开访问只能预览当前版本");
         }
         AppVersion version = requireReadyVersion(appId, versionNo);
-        return storageService.resolveVersionPath(version.getRelativePath());
+        // 预览是只读请求，不能因为访问页面就触发 npm install/build；构建只在生成完成或显式部署流程中执行。
+        return resolveRuntimeDirectory(version, false);
     }
 
     @Override
@@ -760,19 +873,26 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             return;
         }
         if (user == null) {
+            log.warn("应用访问权限校验失败：actor=<anonymous>, appId={}, result=未登录", app.getId());
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR, "请先登录后访问私有应用");
         }
+        log.warn("应用访问权限校验失败：actor={}, appId={}, result=拒绝",
+                user.getUserAccount(), app.getId());
         throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限访问该应用");
     }
 
     private void assertOwnerOrAdmin(App app, UserAccount user) {
         if (!isOwner(app, user) && !userService.isAdmin(user)) {
+            log.warn("应用运营权限校验失败：actor={}, appId={}, result=拒绝",
+                    user == null ? "<anonymous>" : user.getUserAccount(), app.getId());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限操作该应用");
         }
     }
 
     private void assertOwner(App app, UserAccount user) {
         if (!isOwner(app, user)) {
+            log.warn("应用编辑权限校验失败：actor={}, appId={}, result=拒绝",
+                    user == null ? "<anonymous>" : user.getUserAccount(), app.getId());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者可以修改该应用");
         }
     }
@@ -788,11 +908,13 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
 
     private void requireLogin(UserAccount user) {
         if (user == null) {
+            log.warn("应用操作登录校验失败：actor=<anonymous>, result=拒绝");
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR, "请先登录");
         }
     }
 
-    private AppVersion reserveVersion(App app, String prompt, CodeGenTypeEnum type, Long userId) {
+    private AppVersion reserveVersion(App app, String prompt, CodeGenTypeEnum type, Long userId,
+                                      String actorAccount) {
         // 失败或取消的版本也占用过版本号，不能只根据 current_version 递增，否则重试会撞唯一键。
         AppVersion latestVersion = appVersionMapper.selectOneByQuery(QueryWrapper.create()
                 .eq("app_id", app.getId()).orderBy("version_no", false));
@@ -820,10 +942,13 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             appVersionMapper.deleteById(version.getId());
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新生成状态失败");
         }
+        log.info("版本状态流转：actor={}, appId={}, version={}, from=none, to=generating, result=成功",
+                actorAccount, app.getId(), versionNo);
         return version;
     }
 
-    private void markGenerationReady(Long appId, AppVersion version, Long parentId, String aiMessage) {
+    private void markGenerationReady(Long appId, AppVersion version, Long parentId, String actorAccount,
+                                     String aiMessage) {
         AppVersion updateVersion = new AppVersion();
         updateVersion.setId(version.getId());
         updateVersion.setStatus(AppVersionStatusEnum.READY.getValue());
@@ -842,12 +967,14 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         if (!updateById(updateApp)) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存应用生成完成状态失败");
         }
+        log.info("版本状态流转：actor={}, appId={}, version={}, from=generating, to=ready, result=成功",
+                actorAccount, appId, version.getVersionNo());
         if (StringUtils.hasText(aiMessage)) {
             try {
                 chatHistoryService.addMessage(appId, version.getCreatedBy(), aiMessage,
                         ChatHistoryMessageTypeEnum.AI, parentId, version.getVersionNo(),
-                        toJson(storageService.listRelativeFiles(storageService.versionDirectory(
-                                appId, version.getVersionNo()))));
+                        toJson(storageService.listRelativeFiles(storageService.resolveVersionPath(
+                                version.getRelativePath()))));
                 log.info("保存成功生成对话记录：appId={}, version={}", appId, version.getVersionNo());
             } catch (RuntimeException exception) {
                 // 版本已经可靠落盘；历史写入失败不能把已可用版本回滚，但必须留下告警。
@@ -862,7 +989,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         }
     }
 
-    private void markGenerationCancelled(Long appId, AppVersion version, Long parentId) {
+    private void markGenerationCancelled(Long appId, AppVersion version, Long parentId, String actorAccount) {
         AppVersion updateVersion = new AppVersion();
         updateVersion.setId(version.getId());
         updateVersion.setStatus(AppVersionStatusEnum.CANCELLED.getValue());
@@ -872,6 +999,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存代码版本取消状态失败");
         }
         storageService.deleteVersionDirectory(appId, version.getVersionNo());
+        log.info("清理取消版本文件：actor={}, appId={}, version={}, result=完成",
+                actorAccount, appId, version.getVersionNo());
 
         App updateApp = new App();
         updateApp.setId(appId);
@@ -881,10 +1010,13 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         if (!updateById(updateApp)) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存应用生成取消状态失败");
         }
+        log.info("版本状态流转：actor={}, appId={}, version={}, from=generating, to=cancelled, result=成功",
+                actorAccount, appId, version.getVersionNo());
         recordGenerationEvent(appId, version, parentId, "本次生成已取消");
     }
 
-    private void markGenerationFailed(Long appId, AppVersion version, Long parentId, Throwable error) {
+    private void markGenerationFailed(Long appId, AppVersion version, Long parentId, String actorAccount,
+                                      Throwable error) {
         String errorType = error == null ? "未知异常" : error.getClass().getSimpleName();
         log.warn("应用代码生成失败：appId={}, version={}, errorType={}", appId, version.getVersionNo(), errorType);
         AppVersion updateVersion = new AppVersion();
@@ -896,17 +1028,26 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存代码版本失败状态失败");
         }
         storageService.deleteVersionDirectory(appId, version.getVersionNo());
+        log.info("清理失败版本文件：actor={}, appId={}, version={}, result=完成",
+                actorAccount, appId, version.getVersionNo());
 
         App updateApp = new App();
         updateApp.setId(appId);
         updateApp.setGenerationStatus(AppGenerationStatusEnum.FAILED.getValue());
-        updateApp.setGenerationMessage("生成失败，请检查模型配置或稍后重试");
+        // 业务异常的文案本身面向用户（如护轨拦截原因、构建失败提示），直接呈现；
+        // 其他异常不写原文，避免泄露模型供应商、数据库或文件系统的内部信息。
+        String visibleFailure = error instanceof BusinessException businessException
+                && StringUtils.hasText(businessException.getMessage())
+                ? businessException.getMessage()
+                : "生成失败，请检查模型配置或稍后重试";
+        updateApp.setGenerationMessage(visibleFailure);
         updateApp.setUpdateTime(LocalDateTime.now());
         if (!updateById(updateApp)) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存应用生成失败状态失败");
         }
-        // 不把模型供应商、数据库或文件系统异常原文写入用户可见历史，避免泄露内部信息。
-        recordGenerationEvent(appId, version, parentId, "本次生成失败，请检查模型配置或稍后重试");
+        log.info("版本状态流转：actor={}, appId={}, version={}, from=generating, to=failed, result=失败",
+                actorAccount, appId, version.getVersionNo());
+        recordGenerationEvent(appId, version, parentId, "本次" + visibleFailure);
     }
 
     private void recordGenerationEvent(Long appId, AppVersion version, Long parentId, String message) {
@@ -921,7 +1062,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     }
 
     private void deleteRelatedData(Long appId) {
-        appVersionMapper.deleteByQuery(QueryWrapper.create().eq("app_id", appId));
+        int deleted = appVersionMapper.deleteByQuery(QueryWrapper.create().eq("app_id", appId));
+        log.info("清理应用版本记录：appId={}, count={}", appId, deleted);
     }
 
     /**
@@ -930,17 +1072,37 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
      * <p>数据库逻辑删除和磁盘/Redis 不属于同一个事务；只有提交成功后才清理外部资源，
      * 避免数据库回滚后应用记录还在、但代码文件和会话记忆已经消失。</p>
      */
-    private void registerDeleteCleanup(Long appId, String deployKey) {
+    private void registerDeleteCleanup(Long appId, String deployKey, String actorAccount) {
         Runnable cleanup = () -> {
+            boolean allSucceeded = true;
             try {
                 aiCodeGeneratorFacade.evictAppMemory(appId);
-                storageService.deleteApplicationFiles(appId);
-                storageService.deleteDeployment(deployKey);
-                log.info("删除应用外部资源清理完成：appId={}, deployKeyPresent={}", appId,
-                        StringUtils.hasText(deployKey));
             } catch (RuntimeException exception) {
+                allSucceeded = false;
+                log.error("清理应用 AI 记忆失败：actor={}, appId={}, reason={}", actorAccount, appId,
+                        exception.getClass().getSimpleName(), exception);
+            }
+            try {
+                storageService.deleteApplicationFiles(appId);
+            } catch (RuntimeException exception) {
+                allSucceeded = false;
+                log.error("清理应用代码文件失败：actor={}, appId={}, reason={}", actorAccount, appId,
+                        exception.getClass().getSimpleName(), exception);
+            }
+            try {
+                storageService.deleteDeployment(deployKey);
+            } catch (RuntimeException exception) {
+                allSucceeded = false;
+                log.error("清理应用部署文件失败：actor={}, appId={}, reason={}", actorAccount, appId,
+                        exception.getClass().getSimpleName(), exception);
+            }
+            if (allSucceeded) {
+                log.info("删除应用外部资源清理完成：actor={}, appId={}, deployKeyPresent={}, result=成功",
+                        actorAccount, appId, StringUtils.hasText(deployKey));
+            } else {
                 // 文件和缓存清理是补偿动作；失败不能逆转已提交的数据库删除，但必须可追踪。
-                log.error("删除应用外部资源清理失败：appId={}", appId, exception);
+                log.error("删除应用外部资源清理完成但存在失败项：actor={}, appId={}, result=需补偿",
+                        actorAccount, appId);
             }
         };
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -955,6 +1117,20 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         }
     }
 
+    /** 数据库事务结束后释放删除临界区；回滚时也必须释放，避免应用永久不能生成。 */
+    private void registerDeleteGuardRelease(Long appId) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    taskManager.finishDelete(appId);
+                }
+            });
+        } else {
+            taskManager.finishDelete(appId);
+        }
+    }
+
     /** 数据库状态保存失败时尽量恢复部署目录，避免“数据库未切换、线上文件已切换”。 */
     private void restoreDeploymentAfterDatabaseFailure(Long appId, String oldDeployKey,
                                                        Integer oldVersionNo, String switchedDeployKey) {
@@ -964,7 +1140,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                     .eq("app_id", appId).eq("version_no", oldVersionNo)
                     .eq("status", AppVersionStatusEnum.READY.getValue()));
             if (StringUtils.hasText(oldDeployKey) && oldVersion != null) {
-                storageService.deploy(storageService.resolveVersionPath(oldVersion.getRelativePath()), oldDeployKey);
+                storageService.deploy(resolveRuntimeDirectory(oldVersion), oldDeployKey);
                 if (!oldDeployKey.equals(switchedDeployKey)) {
                     storageService.deleteDeployment(switchedDeployKey);
                 }
@@ -989,6 +1165,46 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "可用代码版本不存在");
         }
         return version;
+    }
+
+    /**
+     * 返回可被浏览器或部署目录直接提供的运行目录。
+     * Vue 工程的源代码根目录不是生产静态资源目录，必须提供已经构建好的 dist；部署前
+     * 如果 dist 被人工删除，会再次执行受控构建并在失败时拒绝部署。
+     */
+    private Path resolveRuntimeDirectory(AppVersion version) {
+        return resolveRuntimeDirectory(version, true);
+    }
+
+    private Path resolveRuntimeDirectory(AppVersion version, boolean buildIfMissing) {
+        Path projectRoot = storageService.resolveVersionPath(version.getRelativePath());
+        CodeGenTypeEnum type = CodeGenTypeEnum.getEnumByValue(version.getCodeGenType());
+        if (type != CodeGenTypeEnum.VUE_PROJECT) {
+            return projectRoot;
+        }
+        Path dist = storageService.projectDistDirectory(version.getAppId(), version.getVersionNo());
+        if (!isSafeVueDist(dist) && buildIfMissing) {
+            log.info("Vue 版本缺少构建产物，开始补充构建：appId={}, version={}",
+                    version.getAppId(), version.getVersionNo());
+            if (!vueProjectBuilder.buildProject(projectRoot)) {
+                throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                        "Vue 项目构建失败，请检查 Windows Node.js/npm 环境和生成文件");
+            }
+        }
+        if (!isSafeVueDist(dist)) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "Vue 项目构建产物不存在");
+        }
+        return dist;
+    }
+
+    private boolean isSafeVueDist(Path dist) {
+        Path index = dist.resolve("index.html").normalize();
+        return !Files.isSymbolicLink(dist)
+                && Files.isDirectory(dist)
+                && !Files.isSymbolicLink(index)
+                && Files.isRegularFile(index)
+                && isInsideCodeOutputRoot(dist)
+                && isInsideCodeOutputRoot(index);
     }
 
     private AppVO toAppVO(App app) {
@@ -1026,21 +1242,27 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 .createTime(stringValue(version.getCreateTime())).build();
     }
 
-    private String generateAppName(String prompt) {
+    private String generateAppName(String prompt, String actorAccount) {
         AiCodeGeneratorService aiService = aiCodeGeneratorServiceProvider.getIfAvailable();
         if (aiService != null) {
+            long startedAt = System.nanoTime();
+            log.info("AI 应用命名开始：actor={}, promptLength={}", actorAccount, prompt.length());
             try {
                 AppNameResult name = aiService.generateAppName(prompt);
                 if (name != null && StringUtils.hasText(name.getAppName())) {
                     String clean = name.getAppName().replaceAll("[\\r\\n`\\\"']", "").trim();
                     if (!clean.isBlank()) {
+                        log.info("AI 应用命名结束：actor={}, result=成功, durationMs={}", actorAccount,
+                                elapsedMillis(startedAt));
                         return clean.substring(0, Math.min(clean.length(), 64));
                     }
                 }
             } catch (RuntimeException exception) {
-                log.info("AI 应用命名失败，使用本地回退名称：errorType={}",
-                        exception.getClass().getSimpleName());
+                log.warn("AI 应用命名失败，使用本地回退名称：actor={}, reason={}, durationMs={}", actorAccount,
+                        exception.getClass().getSimpleName(), elapsedMillis(startedAt));
             }
+            log.info("AI 应用命名结束：actor={}, result=回退, durationMs={}", actorAccount,
+                    elapsedMillis(startedAt));
         }
         String fallback = prompt.replaceAll("\\s+", " ").trim();
         return fallback.substring(0, Math.min(fallback.length(), 20));
@@ -1132,23 +1354,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         return value == null ? null : value.toString();
     }
 
+    private long elapsedMillis(long startedAt) {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+    }
+
     private Set<String> listVersionFiles(AppVersion version) {
         Path root = storageService.resolveVersionPath(version.getRelativePath());
         if (!Files.isDirectory(root) || !isInsideCodeOutputRoot(root)) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "代码版本目录不存在");
         }
-        Set<String> fileNames = new TreeSet<>();
-        try (var paths = Files.walk(root)) {
-            paths.filter(path -> Files.isRegularFile(path) && !Files.isSymbolicLink(path))
-                    .map(root::relativize)
-                    .map(Path::normalize)
-                    .filter(path -> !path.startsWith(".."))
-                    .map(path -> path.toString().replace('\\', '/'))
-                    .forEach(fileNames::add);
-        } catch (IOException exception) {
-            throw new BusinessException(ErrorCode.OPERATION_ERROR, "读取版本文件列表失败", exception);
-        }
-        return fileNames;
+        return new TreeSet<>(storageService.listRelativeFiles(root));
     }
 
     private String readFile(AppVersion version, String fileName) {

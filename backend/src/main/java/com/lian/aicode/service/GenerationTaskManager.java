@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -19,8 +20,13 @@ import java.util.concurrent.ConcurrentMap;
 public class GenerationTaskManager {
 
     private final ConcurrentMap<Long, GenerationTask> tasks = new ConcurrentHashMap<>();
+    /** 删除与新生成任务共用同一把进程内锁，避免删除过程中又创建新版本。 */
+    private final Set<Long> deletingApps = ConcurrentHashMap.newKeySet();
 
-    public GenerationTask start(Long appId) {
+    public synchronized GenerationTask start(Long appId) {
+        if (deletingApps.contains(appId)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "应用正在删除，请稍后重试");
+        }
         GenerationTask task = new GenerationTask();
         if (tasks.putIfAbsent(appId, task) != null) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "该应用已有生成任务，请先停止或等待完成");
@@ -33,8 +39,26 @@ public class GenerationTaskManager {
         return task != null && task.cancel();
     }
 
-    public void finish(Long appId, GenerationTask task) {
+    public synchronized void finish(Long appId, GenerationTask task) {
         tasks.remove(appId, task);
+    }
+
+    /**
+     * 尝试进入应用删除临界区。
+     *
+     * <p>生成任务一旦开始，删除接口必须等待其自然结束或由用户明确停止后再重试，
+     * 不能一边删除数据库和文件，一边让旧任务继续写入新版本。</p>
+     */
+    public synchronized boolean beginDelete(Long appId) {
+        if (tasks.containsKey(appId) || deletingApps.contains(appId)) {
+            return false;
+        }
+        deletingApps.add(appId);
+        return true;
+    }
+
+    public synchronized void finishDelete(Long appId) {
+        deletingApps.remove(appId);
     }
 
     public boolean isGenerating(Long appId) {

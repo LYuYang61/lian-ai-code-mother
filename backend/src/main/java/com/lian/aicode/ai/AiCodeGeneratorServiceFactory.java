@@ -2,7 +2,10 @@ package com.lian.aicode.ai;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.lian.aicode.ai.guardrail.PromptSafetyInputGuardrail;
+import com.lian.aicode.ai.tools.ProjectToolBundle;
 import com.lian.aicode.service.ChatHistoryService;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
@@ -99,6 +102,34 @@ public class AiCodeGeneratorServiceFactory {
         return appServiceCache.get(appId, id -> createAppService(id, excludedMessageId));
     }
 
+    /**
+     * 创建一次性的 Vue 工程 AI Service。
+     *
+     * <p>工具绑定的是具体版本目录，不能放进按 appId 缓存的服务，否则同一个应用的两个
+     * 版本在并发或取消后可能互相写文件。因此 HTML/MULTI 使用缓存，Vue 工程使用任务级实例。</p>
+     */
+    public AiCodeGeneratorService getForVueProject(Long appId, Long excludedMessageId,
+                                                    ProjectToolBundle toolBundle) {
+        if (appId == null || appId <= 0 || toolBundle == null) {
+            throw new IllegalArgumentException("Vue 工程 AI Service 参数无效");
+        }
+        MessageWindowChatMemory memory = createChatMemory(appId, excludedMessageId);
+        AiCodeGeneratorService service = AiServices.builder(AiCodeGeneratorService.class)
+                .chatModel(chatModel)
+                .streamingChatModel(streamingChatModel)
+                .chatMemoryProvider(memoryId -> memory)
+                .tools(toolBundle.tools())
+                // 模型偶尔会返回不存在的工具名；把错误交回模型，而不是让请求静默成功。
+                .hallucinatedToolNameStrategy(request -> ToolExecutionResultMessage.from(
+                        request, "不存在名为 " + request.name() + " 的工具，请改用已声明的文件工具"))
+                .maxSequentialToolsInvocations(20)
+                .inputGuardrails(new PromptSafetyInputGuardrail())
+                .build();
+        log.info("创建 Vue 工程 AI Service：appId={}, excludedMessageId={}, toolCount={}",
+                appId, excludedMessageId, toolBundle.tools().size());
+        return service;
+    }
+
     /** 删除应用时同步清理本地缓存和 Redis 中的模型记忆。 */
     public void evictAppService(Long appId) {
         if (appId == null || appId <= 0) {
@@ -126,8 +157,18 @@ public class AiCodeGeneratorServiceFactory {
                 .chatModel(chatModel)
                 .streamingChatModel(streamingChatModel);
         if (appId == null) {
-            return builder.build();
+            // 接口包含带 @MemoryId 的 Vue 方法；即使默认命名/摘要服务暂时不用记忆，
+            // LangChain4j 仍要求在构建代理时声明 ChatMemoryProvider。
+            return builder.chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
+                    .id(memoryId)
+                    .maxMessages(maxMessages)
+                    .build()).build();
         }
+        var chatMemory = createChatMemory(appId, excludedMessageId);
+        return builder.chatMemoryProvider(memoryId -> chatMemory).build();
+    }
+
+    private MessageWindowChatMemory createChatMemory(Long appId, Long excludedMessageId) {
         MessageWindowChatMemory.Builder memoryBuilder = MessageWindowChatMemory.builder()
                 .id(memoryId(appId))
                 .maxMessages(maxMessages)
@@ -135,10 +176,10 @@ public class AiCodeGeneratorServiceFactory {
         if (chatMemoryEnabled) {
             memoryBuilder.chatMemoryStore(redisChatMemoryStore);
         }
-        var chatMemory = memoryBuilder.build();
-        // 缓存首次创建时从数据库恢复；后续请求由 LangChain4j 自动更新 Redis 窗口。
+        MessageWindowChatMemory chatMemory = memoryBuilder.build();
+        // 首次创建时从数据库恢复；后续请求由 LangChain4j 自动更新 Redis 窗口。
         chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, maxMessages, excludedMessageId);
-        return builder.chatMemory(chatMemory).build();
+        return chatMemory;
     }
 
     private String memoryId(Long appId) {

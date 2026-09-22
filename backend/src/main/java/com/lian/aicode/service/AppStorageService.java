@@ -7,9 +7,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.List;
 import java.util.Comparator;
 import java.util.UUID;
@@ -41,6 +45,23 @@ public class AppStorageService {
         return codeOutputRoot;
     }
 
+    /**
+     * 校验静态资源控制器使用的根目录仍属于应用管理的代码或部署根目录。
+     * 除了字符串规范化，还要检查最终真实路径，避免根目录本身被替换成符号链接。
+     */
+    public boolean isInsideManagedRoot(Path path) {
+        if (path == null || Files.isSymbolicLink(path)) {
+            return false;
+        }
+        try {
+            Path realPath = path.toRealPath();
+            return realPath.startsWith(codeOutputRoot.toRealPath())
+                    || realPath.startsWith(deployRoot.toRealPath());
+        } catch (IOException exception) {
+            return false;
+        }
+    }
+
     public Path versionDirectory(Long appId, int versionNo) {
         if (appId == null || appId <= 0 || versionNo <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "应用版本参数错误");
@@ -53,12 +74,87 @@ public class AppStorageService {
         return Path.of("app", appId.toString(), "v" + versionNo).toString();
     }
 
+    /** Vue 工程的生产静态目录；HTML 模式直接使用 versionDirectory。 */
+    public Path projectDistDirectory(Long appId, int versionNo) {
+        return versionDirectory(appId, versionNo).resolve("dist").normalize();
+    }
+
+    /**
+     * 为新 Vue 版本继承上一可用版本的源文件。
+     *
+     * <p>构建产物、依赖目录、版本控制目录和敏感文件不会复制；源目录和目标目录都必须
+     * 位于受控代码根下，且遍历过程中拒绝符号链接。</p>
+     */
+    public void copyProjectSource(Path sourceDirectory, Path targetDirectory) {
+        Path source = sourceDirectory == null ? null : sourceDirectory.toAbsolutePath().normalize();
+        Path target = targetDirectory == null ? null : targetDirectory.toAbsolutePath().normalize();
+        if (source == null || target == null || source.equals(target)
+                || !source.startsWith(codeOutputRoot) || !target.startsWith(codeOutputRoot)
+                || Files.isSymbolicLink(source) || Files.isSymbolicLink(target)
+                || hasSymbolicLinkBetween(codeOutputRoot, source)
+                || hasSymbolicLinkBetween(codeOutputRoot, target)
+                || !Files.isDirectory(source) || !isInsideRealRoot(codeOutputRoot, source)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "版本源目录不在受控代码根目录内");
+        }
+        try {
+            Files.createDirectories(target);
+            if (Files.isSymbolicLink(target) || !isInsideRealRoot(codeOutputRoot, target)) {
+                throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "版本目标目录不在受控代码根目录内");
+            }
+            final int[] copiedFiles = {0};
+            Files.walkFileTree(source, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes)
+                        throws IOException {
+                    if (Files.isSymbolicLink(directory)) {
+                        throw new IOException("不允许复制符号链接目录");
+                    }
+                    if (!directory.equals(source) && isIgnoredProjectPath(source, directory)) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+                    Path destination = target.resolve(source.relativize(directory)).normalize();
+                    if (!destination.startsWith(target) || hasSymbolicLinkBetween(target, destination)) {
+                        throw new IOException("版本复制路径非法");
+                    }
+                    Files.createDirectories(destination);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                    if (Files.isSymbolicLink(file)) {
+                        throw new IOException("不允许复制符号链接文件");
+                    }
+                    if (isIgnoredProjectPath(source, file)) {
+                        return FileVisitResult.CONTINUE;
+                    }
+                    Path destination = target.resolve(source.relativize(file)).normalize();
+                    if (!destination.startsWith(target) || hasSymbolicLinkBetween(target, destination.getParent())) {
+                        throw new IOException("版本复制路径非法");
+                    }
+                    Files.createDirectories(destination.getParent());
+                    Files.copy(file, destination, StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.COPY_ATTRIBUTES);
+                    copiedFiles[0]++;
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+            log.info("继承 Vue 工程源文件：sourceVersion={}, targetVersion={}, fileCount={}, result=成功",
+                    source.getFileName(), target.getFileName(), copiedFiles[0]);
+        } catch (IOException exception) {
+            deleteRecursively(target);
+            log.warn("继承 Vue 工程源文件失败：sourceVersion={}, targetVersion={}, reason={}",
+                    source.getFileName(), target.getFileName(), exception.getClass().getSimpleName());
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "复制上一版本工程文件失败", exception);
+        }
+    }
+
     public Path resolveVersionPath(String relativePath) {
         if (relativePath == null || relativePath.isBlank()) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "代码版本目录不存在");
         }
         Path path = codeOutputRoot.resolve(relativePath).normalize();
-        if (!path.startsWith(codeOutputRoot)) {
+        if (!path.startsWith(codeOutputRoot) || hasSymbolicLinkBetween(codeOutputRoot, path)) {
             throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "非法代码目录");
         }
         if (Files.exists(path) && !isInsideRealRoot(codeOutputRoot, path)) {
@@ -87,6 +183,9 @@ public class AppStorageService {
                 .normalize();
         try {
             Files.createDirectories(deployRoot);
+            if (Files.isSymbolicLink(deployRoot)) {
+                throw new IOException("部署根目录不能是符号链接");
+            }
             copyDirectory(normalizedSource, temporaryDirectory);
             // 先把旧目录移到同一文件系统下的备份目录，再切换新目录，避免先删除旧目录造成短暂 404。
             if (Files.exists(targetDirectory)) {
@@ -118,7 +217,9 @@ public class AppStorageService {
     }
 
     public void deleteVersionDirectory(Long appId, int versionNo) {
-        deleteRecursively(versionDirectory(appId, versionNo));
+        Path directory = versionDirectory(appId, versionNo);
+        deleteRecursively(directory);
+        log.info("清理代码版本文件：appId={}, version={}, result=完成", appId, versionNo);
     }
 
     public void deleteApplicationFiles(Long appId) {
@@ -148,6 +249,7 @@ public class AppStorageService {
             return paths
                     .filter(Files::isRegularFile)
                     .filter(path -> !Files.isSymbolicLink(path))
+                    .filter(path -> !isIgnoredProjectPath(normalized, path))
                     .map(normalized::relativize)
                     .map(Path::normalize)
                     .filter(path -> !path.startsWith(".."))
@@ -194,11 +296,68 @@ public class AppStorageService {
         }
     }
 
+    private boolean isIgnoredProjectPath(Path root, Path path) {
+        Path relative = root.relativize(path).normalize();
+        for (Path segment : relative) {
+            String name = segment.toString().toLowerCase(java.util.Locale.ROOT);
+            if (name.equals("node_modules") || name.equals("dist") || name.equals("build")
+                    || name.equals(".git") || name.equals("target") || name.equals(".idea")
+                    || name.equals(".vscode") || name.equals(".mvn") || name.equals(".env")
+                    || name.startsWith(".env.") || name.equals(".npmrc") || name.equals(".yarnrc")
+                    || name.equals(".yarnrc.yml") || name.endsWith(".pem") || name.endsWith(".key")
+                    || name.equals("id_rsa") || name.equals("secrets") || name.equals("credentials")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasSymbolicLinkBetween(Path root, Path path) {
+        if (root == null || path == null) {
+            return true;
+        }
+        Path normalizedRoot = root.toAbsolutePath().normalize();
+        Path normalizedPath = path.toAbsolutePath().normalize();
+        if (!normalizedPath.startsWith(normalizedRoot)) {
+            return true;
+        }
+        Path current = normalizedRoot;
+        if (Files.isSymbolicLink(current)) {
+            return true;
+        }
+        for (Path segment : normalizedRoot.relativize(normalizedPath)) {
+            current = current.resolve(segment);
+            if (Files.isSymbolicLink(current)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void deleteRecursively(Path path) {
-        if (path == null || !Files.exists(path)) {
+        // 不跟随符号链接判断存在性，失效链接也必须被清理，不能遗留在受控目录中。
+        Path normalized = path == null ? null : path.toAbsolutePath().normalize();
+        Path managedRoot = normalized != null && normalized.startsWith(codeOutputRoot)
+                ? codeOutputRoot
+                : normalized != null && normalized.startsWith(deployRoot) ? deployRoot : null;
+        Path parent = normalized == null ? null : normalized.getParent();
+        if (normalized == null || managedRoot == null || hasSymbolicLinkBetween(managedRoot, parent)
+                || !Files.exists(normalized, LinkOption.NOFOLLOW_LINKS)) {
+            if (normalized != null && managedRoot == null) {
+                log.warn("拒绝清理受控根目录外的文件：path={}", normalized.getFileName());
+            }
             return;
         }
-        try (var paths = Files.walk(path)) {
+        if (Files.isSymbolicLink(normalized)) {
+            try {
+                Files.deleteIfExists(normalized);
+            } catch (IOException exception) {
+                log.warn("清理符号链接失败：path={}, reason={}", normalized.getFileName(),
+                        exception.getClass().getSimpleName());
+            }
+            return;
+        }
+        try (var paths = Files.walk(normalized)) {
             paths.sorted(Comparator.reverseOrder()).forEach(item -> {
                 try {
                     Files.deleteIfExists(item);

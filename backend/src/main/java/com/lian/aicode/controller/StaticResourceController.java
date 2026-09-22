@@ -3,6 +3,7 @@ package com.lian.aicode.controller;
 import com.lian.aicode.model.entity.App;
 import com.lian.aicode.model.enums.AppDeploymentStatusEnum;
 import com.lian.aicode.service.AppService;
+import com.lian.aicode.service.AppStorageService;
 import com.lian.aicode.service.UserService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.core.io.FileSystemResource;
@@ -25,10 +26,13 @@ public class StaticResourceController {
 
     private final AppService appService;
     private final UserService userService;
+    private final AppStorageService storageService;
 
-    public StaticResourceController(AppService appService, UserService userService) {
+    public StaticResourceController(AppService appService, UserService userService,
+                                    AppStorageService storageService) {
         this.appService = appService;
         this.userService = userService;
+        this.storageService = storageService;
     }
 
     @GetMapping({"/preview/{appId}/{versionNo}", "/preview/{appId}/{versionNo}/",
@@ -52,6 +56,9 @@ public class StaticResourceController {
     private ResponseEntity<Resource> serve(Path root, HttpServletRequest request, String prefix) {
         try {
             Path normalizedRoot = root.toAbsolutePath().normalize();
+            if (!storageService.isInsideManagedRoot(normalizedRoot)) {
+                return ResponseEntity.notFound().build();
+            }
             String pathWithin = (String) request.getAttribute(
                     HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE);
             String resourcePart = pathWithin == null ? "" : pathWithin.substring(Math.min(prefix.length(), pathWithin.length()));
@@ -70,6 +77,9 @@ public class StaticResourceController {
             if (!resourcePath.startsWith(normalizedRoot)
                     || Files.isSymbolicLink(resourcePath)
                     || !Files.isRegularFile(resourcePath)) {
+                return ResponseEntity.notFound().build();
+            }
+            if (isSensitiveProjectPath(normalizedRoot.relativize(resourcePath).normalize())) {
                 return ResponseEntity.notFound().build();
             }
             // 仅检查 normalize 不能防止“版本目录内的中间层符号链接”跳出根目录。
@@ -104,6 +114,19 @@ public class StaticResourceController {
         } catch (java.io.IOException exception) {
             return false;
         }
+    }
+
+    private boolean isSensitiveProjectPath(Path relative) {
+        for (Path segment : relative) {
+            String name = segment.toString().toLowerCase(java.util.Locale.ROOT);
+            if (name.equals(".env") || name.startsWith(".env.") || name.equals(".npmrc")
+                    || name.equals(".yarnrc") || name.equals(".yarnrc.yml")
+                    || name.equals("id_rsa") || name.equals("secrets") || name.equals("credentials")
+                    || name.endsWith(".pem") || name.endsWith(".key")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String contentType(Path resourcePath) {

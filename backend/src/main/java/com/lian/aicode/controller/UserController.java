@@ -19,6 +19,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -32,6 +33,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/user")
 @RequiredArgsConstructor
+@Slf4j
 public class UserController {
 
     private final UserService userService;
@@ -39,14 +41,18 @@ public class UserController {
     @Operation(summary = "用户注册")
     @PostMapping("/register")
     public BaseResponse<Long> register(@Valid @RequestBody UserRegisterRequest request) {
-        return ResultUtils.success(userService.register(request));
+        Long userId = userService.register(request);
+        log.info("用户注册接口完成：actor={}, userId={}, result=成功", request.getUserAccount(), userId);
+        return ResultUtils.success(userId);
     }
 
     @Operation(summary = "用户登录")
     @PostMapping("/login")
     public BaseResponse<LoginUserVO> login(@Valid @RequestBody UserLoginRequest request,
                                            HttpServletRequest httpRequest) {
-        return ResultUtils.success(userService.login(request.getUserAccount(), request.getUserPassword(), httpRequest));
+        LoginUserVO result = userService.login(request.getUserAccount(), request.getUserPassword(), httpRequest);
+        log.info("用户登录接口完成：actor={}, userId={}, result=成功", result.getUserAccount(), result.getId());
+        return ResultUtils.success(result);
     }
 
     @Operation(summary = "获取当前登录用户")
@@ -91,8 +97,11 @@ public class UserController {
     @PostMapping("/admin/update")
     public BaseResponse<Boolean> adminUpdate(@Valid @RequestBody UserAdminUpdateRequest request,
                                              HttpServletRequest httpRequest) {
-        requireAdmin(httpRequest);
-        return ResultUtils.success(userService.adminUpdate(request));
+        UserAccount admin = requireAdmin(httpRequest);
+        boolean result = userService.adminUpdate(request, admin);
+        log.info("管理员更新用户：actor={}, targetUserId={}, role={}, result={}",
+                admin.getUserAccount(), request.getId(), request.getUserRole(), result ? "成功" : "失败");
+        return ResultUtils.success(result);
     }
 
     @Operation(summary = "管理员删除用户")
@@ -102,12 +111,16 @@ public class UserController {
         if (admin.getId().equals(id)) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "不能删除当前管理员账号");
         }
-        return ResultUtils.success(userService.deleteUser(id));
+        boolean result = userService.deleteUser(id, admin);
+        log.info("管理员删除用户：actor={}, targetUserId={}, result={}",
+                admin.getUserAccount(), id, result ? "成功" : "失败");
+        return ResultUtils.success(result);
     }
 
     private UserAccount requireAdmin(HttpServletRequest request) {
         UserAccount loginUser = userService.getLoginUser(request);
         if (!userService.isAdmin(loginUser)) {
+            log.warn("管理员权限校验失败：actor={}, result=拒绝", loginUser.getUserAccount());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "需要管理员权限");
         }
         return loginUser;

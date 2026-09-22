@@ -24,6 +24,8 @@ public class CodeParserExecutor {
         return switch (codeGenType) {
             case HTML -> htmlCodeParser.parseCode(codeContent);
             case MULTI_FILE -> multiFileCodeParser.parseCode(codeContent);
+            case VUE_PROJECT -> throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                    "Vue 工程使用工具调用写入文件，不能解析为 Markdown 代码块");
         };
     }
 }

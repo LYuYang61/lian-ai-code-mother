@@ -79,7 +79,7 @@
             <artifactId>spring-security-crypto</artifactId>
         </dependency>
 
-        <!-- 教程要求的 MySQL 驱动；本期还没有数据访问配置，因此启动不会连接数据库。 -->
+        <!-- MySQL 8 驱动；真实 local profile 使用它连接业务数据库，测试 profile 改用 H2。 -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>

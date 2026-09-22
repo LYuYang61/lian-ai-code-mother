@@ -107,6 +107,7 @@ public class ChatHistoryController {
     private UserAccount requireAdmin(HttpServletRequest request) {
         UserAccount user = userService.getLoginUser(request);
         if (!userService.isAdmin(user)) {
+            log.warn("对话历史管理员权限校验失败：actor={}, result=拒绝", user.getUserAccount());
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "需要管理员权限");
         }
         return user;

@@ -37,7 +37,7 @@ public interface AppService {
 
     boolean updateApp(AppUpdateRequest request, UserAccount loginUser);
 
-    boolean adminUpdateApp(AppAdminUpdateRequest request);
+    boolean adminUpdateApp(AppAdminUpdateRequest request, UserAccount operator);
 
     boolean deleteApp(Long appId, UserAccount loginUser);
 

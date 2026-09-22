@@ -4,12 +4,13 @@ import lombok.Getter;
 
 import java.util.Arrays;
 
-/** 原生网页代码的生成模式。枚举值会参与输出目录命名，必须保持稳定。 */
+/** 网站代码生成模式。枚举值会参与数据库和前端协议，必须保持稳定。 */
 @Getter
 public enum CodeGenTypeEnum {
 
     HTML("原生 HTML 模式", "html"),
-    MULTI_FILE("原生多文件模式", "multi_file");
+    MULTI_FILE("原生多文件模式", "multi_file"),
+    VUE_PROJECT("Vue 工程模式", "vue_project");
 
     private final String text;
     private final String value;
