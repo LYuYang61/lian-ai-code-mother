@@ -6,10 +6,11 @@ export interface BaseResponse<T> {
 
 export interface PageResult<T> {
   records: T[]
-  pageNum: number
-  pageSize: number
-  total: number
-  pages: number
+  // Jackson 将 Java long 统一序列化为字符串，避免雪花 ID/计数在浏览器丢失精度。
+  pageNum: number | string
+  pageSize: number | string
+  total: number | string
+  pages: number | string
 }
 
 export interface LoginUser {
@@ -25,7 +26,7 @@ export interface UserVO extends LoginUser {
   createTime?: string | null
 }
 
-export type CodeGenType = 'html' | 'multi_file'
+export type CodeGenType = 'html' | 'multi_file' | 'vue_project'
 export type AppVisibility = 'private' | 'public'
 export type AppGenerationStatus = 'draft' | 'generating' | 'ready' | 'failed' | 'cancelled'
 export type AppDeploymentStatus = 'undeployed' | 'deployed' | 'paused'
@@ -94,8 +95,8 @@ export interface CursorPageResult<T> {
 
 export interface ChatHistoryStatsVO {
   appId: string
-  messageCount: number
-  roundCount: number
+  messageCount: number | string
+  roundCount: number | string
   lastCreateTime?: string | null
   summaryUpdatedTime?: string | null
 }

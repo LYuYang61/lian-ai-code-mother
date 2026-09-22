@@ -115,7 +115,7 @@ const load = async () => {
     const response = await listAdminChatHistory(query)
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     records.value = response.data.data.records
-    pagination.total = response.data.data.total
+    pagination.total = Number(response.data.data.total)
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载对话历史失败')
   } finally {

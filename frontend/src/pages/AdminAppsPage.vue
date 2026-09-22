@@ -93,7 +93,7 @@ const load = async () => {
     })
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     apps.value = response.data.data.records
-    pagination.total = response.data.data.total
+    pagination.total = Number(response.data.data.total)
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载管理数据失败')
   } finally {

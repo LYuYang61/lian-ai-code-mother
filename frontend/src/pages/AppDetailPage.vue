@@ -27,7 +27,7 @@
           <a-textarea v-model:value="prompt" :rows="7" maxlength="10000" show-count :disabled="!canEdit"
             placeholder="例如：把按钮改成绿色，并增加暗色模式切换" @keydown.ctrl.enter="sendMessage" />
           <a-space class="prompt-actions" wrap>
-            <a-tag color="blue">{{ app.codeGenType === 'multi_file' ? '多文件模式' : 'HTML 模式' }}</a-tag>
+            <a-tag color="blue">{{ codeGenTypeText(app.codeGenType) }}</a-tag>
             <a-tag :color="app.visibility === 'public' ? 'green' : 'default'">
               {{ app.visibility === 'public' ? '公开' : '私有' }}
             </a-tag>
@@ -37,6 +37,11 @@
 
         <a-card title="模型流输出" :bordered="false" class="panel-card">
           <a-alert v-if="streaming" type="info" show-icon message="模型正在流式返回，文件会在完整结束后保存为新版本" />
+          <a-collapse v-if="thinkingOutput" ghost class="thinking-panel">
+            <a-collapse-panel key="thinking" header="查看思考摘要">
+              <pre class="thinking-output">{{ thinkingOutput }}</pre>
+            </a-collapse-panel>
+          </a-collapse>
           <pre class="stream-output">{{ streamOutput || '发送一条需求后，模型输出会显示在这里。' }}</pre>
         </a-card>
 
@@ -87,6 +92,12 @@
         </a-card>
 
         <a-card v-if="canViewMembers" title="协作者" :bordered="false" class="panel-card">
+          <a-alert v-if="collaboratorsError" type="warning" show-icon
+            :message="collaboratorsError">
+            <template #action>
+              <a-button type="link" size="small" @click="loadCollaborators()">重试</a-button>
+            </template>
+          </a-alert>
           <a-space v-if="canManage" wrap>
             <a-input v-model:value="collaboratorAccount" style="width: 160px" placeholder="用户账号，如 qing"
               @keydown.enter="saveCollaborator" />
@@ -183,7 +194,7 @@
     <a-descriptions :column="1" bordered size="small">
       <a-descriptions-item label="创建者">{{ app.owner?.userName || app.userId }}</a-descriptions-item>
       <a-descriptions-item label="创建时间">{{ app.createTime }}</a-descriptions-item>
-      <a-descriptions-item label="生成模式">{{ app.codeGenType === 'multi_file' ? 'HTML + CSS + JS' : '单 HTML' }}</a-descriptions-item>
+      <a-descriptions-item label="生成模式">{{ codeGenTypeText(app.codeGenType) }}</a-descriptions-item>
       <a-descriptions-item label="可见范围">{{ app.visibility === 'public' ? '公开' : '私有' }}</a-descriptions-item>
       <a-descriptions-item label="精选状态">{{ app.featuredStatus }}</a-descriptions-item>
       <a-descriptions-item label="对话轮次">{{ app.conversationRounds }}</a-descriptions-item>
@@ -265,8 +276,20 @@ import type {
   ChatHistoryStatsVO,
   ChatHistoryVO,
   ChatSummaryVO,
+  CodeGenType,
 } from '@/api/types'
 import { useUserStore } from '@/stores/user'
+
+type StreamMessagePayload = {
+  type?: 'ai_response' | 'thinking' | 'tool_request' | 'tool_executed' | string
+  data?: string
+  id?: string
+  name?: string
+  displayName?: string
+  arguments?: string
+  result?: string
+  d?: string
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -285,6 +308,7 @@ const summary = ref<ChatSummaryVO | null>(null)
 const summaryOpen = ref(false)
 const summaryLoading = ref(false)
 const collaborators = ref<AppCollaboratorVO[]>([])
+const collaboratorsError = ref('')
 const collaboratorAccount = ref('')
 const collaboratorRole = ref<AppCollaboratorRole>('editor')
 const collaboratorSaving = ref(false)
@@ -311,6 +335,7 @@ const scrollHistoryToBottom = async () => {
 }
 const prompt = ref('')
 const streamOutput = ref('')
+const thinkingOutput = ref('')
 const streaming = ref(false)
 const detailOpen = ref(false)
 const editOpen = ref(false)
@@ -326,8 +351,13 @@ const editForm = reactive({
   visibility: 'private' as 'private' | 'public',
 })
 let eventSource: EventSource | null = null
+let pageLoadSequence = 0
+let historyRequestSequence = 0
+let historyRequestAppId = ''
 
 const appId = computed(() => String(route.params.id))
+const isCurrentPage = (sequence: number, requestedAppId: string) =>
+  sequence === pageLoadSequence && appId.value === requestedAppId
 const canManage = computed(() => {
   if (!app.value || !userStore.isLogin) return false
   return userStore.isAdmin || userStore.user?.id === app.value.userId
@@ -336,7 +366,8 @@ const canManage = computed(() => {
 // 成员名单对创建者、管理员和所有协作者可见；添加/移除控件仍仅限 canManage。
 const canViewMembers = computed(() => {
   if (!app.value || !userStore.isLogin) return false
-  return canManage.value || collaborators.value.some((item) => item.userId === userStore.user?.id)
+  return canManage.value || collaboratorsError.value.length > 0
+    || collaborators.value.some((item) => item.userId === userStore.user?.id)
 })
 // 管理员可以运营应用，但不能代替创建者发起 AI 生成，避免误触发他人的模型费用。
 const canEdit = computed(() => {
@@ -353,12 +384,50 @@ const canApplyFeatured = computed(() => canManage.value
   && app.value?.featuredStatus !== 'pending')
 const previewUrl = computed(() => {
   if (!app.value || app.value.currentVersion <= 0) return ''
-  return resolveApiPath(`/preview/${app.value.id}/${app.value.currentVersion}/`)
+  // 后端返回的 URL 已包含 context-path；直接使用可避免 VITE_API_BASE_URL 再拼一次 /api。
+  return app.value.previewUrl || resolveApiPath(`/preview/${app.value.id}/${app.value.currentVersion}/`)
 })
 
 const getErrorMessage = (error: unknown, fallback: string) => {
   if (error instanceof Error && error.message) return error.message
   return fallback
+}
+
+const codeGenTypeText = (type: CodeGenType) => ({
+  html: 'HTML 模式',
+  multi_file: '多文件模式',
+  vue_project: 'Vue3 工程模式',
+}[type] || '网页应用模式')
+
+const toolArgumentSummary = (argumentsText?: string) => {
+  if (!argumentsText) return ''
+  try {
+    const argumentsObject = JSON.parse(argumentsText) as Record<string, unknown>
+    const filePath = argumentsObject.relativeFilePath || argumentsObject.relativeDirPath
+    return typeof filePath === 'string' && filePath ? `：${filePath}` : ''
+  } catch {
+    return ''
+  }
+}
+
+const appendStreamMessage = (payload: StreamMessagePayload) => {
+  switch (payload.type) {
+    case 'ai_response':
+      streamOutput.value += payload.data || ''
+      break
+    case 'thinking':
+      thinkingOutput.value += payload.data || ''
+      break
+    case 'tool_request':
+      streamOutput.value += `\n\n[选择工具] ${payload.displayName || payload.name || '文件工具'}`
+      break
+    case 'tool_executed':
+      streamOutput.value += `\n\n[工具调用] ${payload.displayName || payload.name || '文件工具'}${toolArgumentSummary(payload.arguments)}\n`
+      if (payload.result) streamOutput.value += `${payload.result}\n`
+      break
+    default:
+      streamOutput.value += payload.data || ''
+  }
 }
 
 const resetHistory = () => {
@@ -371,19 +440,30 @@ const resetHistory = () => {
   summary.value = null
 }
 
-const loadHistory = async (reset = false, notifyError = false) => {
-  if (!userStore.isLogin || historyLoading.value) return false
+const loadHistory = async (
+  reset = false,
+  notifyError = false,
+  requestedAppId = appId.value,
+  sequence = pageLoadSequence,
+) => {
+  if (!userStore.isLogin
+    || (historyLoading.value && historyRequestAppId === requestedAppId)) return false
   if (reset) resetHistory()
   historyError.value = ''
   historyLoading.value = true
+  const requestId = ++historyRequestSequence
+  historyRequestAppId = requestedAppId
   const oldHeight = historyScrollRef.value?.scrollHeight || 0
   const oldTop = historyScrollRef.value?.scrollTop || 0
   try {
-    const response = await listAppChatHistory(appId.value, {
+    const response = await listAppChatHistory(requestedAppId, {
       pageSize: 10,
       lastCreateTime: reset ? undefined : historyCursorTime.value || undefined,
       lastId: reset ? undefined : historyCursorId.value || undefined,
     })
+    if (!isCurrentPage(sequence, requestedAppId) || requestId !== historyRequestSequence) {
+      return false
+    }
     if (response.data.code !== 0 || !response.data.data) {
       if (reset) resetHistory()
       throw new Error(response.data.message || (reset ? '加载对话历史失败' : '加载更早对话失败'))
@@ -406,11 +486,17 @@ const loadHistory = async (reset = false, notifyError = false) => {
     }
     return true
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId) || requestId !== historyRequestSequence) {
+      return false
+    }
     historyError.value = getErrorMessage(error, reset ? '加载对话历史失败' : '加载更早对话失败')
     if (notifyError) throw error
     return false
   } finally {
-    historyLoading.value = false
+    if (requestId === historyRequestSequence) {
+      historyLoading.value = false
+      historyRequestAppId = ''
+    }
   }
 }
 
@@ -426,31 +512,47 @@ const retryHistory = async () => {
   })
 }
 
-const loadHistoryStats = async () => {
+const loadHistoryStats = async (
+  requestedAppId = appId.value,
+  sequence = pageLoadSequence,
+) => {
   if (!userStore.isLogin) return
   try {
-    const response = await getChatHistoryStats(appId.value)
-    if (response.data.code === 0) historyStats.value = response.data.data
+    const response = await getChatHistoryStats(requestedAppId)
+    if (isCurrentPage(sequence, requestedAppId) && response.data.code === 0) {
+      historyStats.value = response.data.data
+    }
   } catch {
     // 统计不是工作区主功能，权限不足或网络失败不阻断应用页面。
   }
 }
 
-const loadCollaborators = async () => {
+const loadCollaborators = async (
+  requestedAppId = appId.value,
+  sequence = pageLoadSequence,
+) => {
   if (!userStore.isLogin) return
   try {
-    const response = await listCollaborators(appId.value)
-    if (response.data.code === 0) collaborators.value = response.data.data || []
-  } catch {
+    const response = await listCollaborators(requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
+    if (response.data.code !== 0) throw new Error(response.data.message || '协作者加载失败')
+    collaborators.value = response.data.data || []
+    collaboratorsError.value = ''
+  } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     collaborators.value = []
+    collaboratorsError.value = getErrorMessage(error, '协作者加载失败，请点击重试')
   }
 }
 
-const loadAll = async () => {
-  const appResponse = await getApp(appId.value)
+const loadAll = async (sequence = pageLoadSequence) => {
+  const requestedAppId = appId.value
+  const appResponse = await getApp(requestedAppId)
+  if (!isCurrentPage(sequence, requestedAppId)) return false
   if (appResponse.data.code !== 0 || !appResponse.data.data) throw new Error(appResponse.data.message)
   const loadedApp = appResponse.data.data
-  const versionResponse = await listVersions(appId.value)
+  const versionResponse = await listVersions(requestedAppId)
+  if (!isCurrentPage(sequence, requestedAppId)) return false
   if (versionResponse.data.code !== 0 || !versionResponse.data.data) {
     throw new Error(versionResponse.data.message)
   }
@@ -458,15 +560,19 @@ const loadAll = async () => {
   app.value = loadedApp
   versions.value = versionResponse.data.data?.filter((item) => item.status === 'ready') || []
   collaborators.value = []
+  collaboratorsError.value = ''
   resetHistory()
   // 成员、历史和统计彼此独立；任何一个辅助请求失败都不应让工作区永久转圈。
-  await loadCollaborators()
-  const historyLoaded = await loadHistory(true, true).catch((error: unknown) => {
+  await loadCollaborators(requestedAppId, sequence)
+  const historyLoaded = await loadHistory(true, true, requestedAppId, sequence).catch((error: unknown) => {
+    if (!isCurrentPage(sequence, requestedAppId)) return false
     // 历史是工作区的重要数据，首屏失败必须给出反馈，但不能覆盖已经成功加载的应用详情。
     message.error(getErrorMessage(error, '加载对话历史失败'))
     return false
   })
-  await loadHistoryStats()
+  if (!isCurrentPage(sequence, requestedAppId)) return false
+  await loadHistoryStats(requestedAppId, sequence)
+  if (!isCurrentPage(sequence, requestedAppId)) return false
   if (versions.value.length > 1) {
     const [newest, previous] = versions.value
     if (newest && previous) {
@@ -477,17 +583,29 @@ const loadAll = async () => {
   return historyLoaded
 }
 
-const refreshApp = async (fallback = '刷新应用状态失败') => {
+const refreshApp = async (
+  fallback = '刷新应用状态失败',
+  sequence = pageLoadSequence,
+  requestedAppId = appId.value,
+) => {
   try {
-    await loadAll()
-    return true
+    await loadAll(sequence)
+    // 路由切换后，旧应用的响应不能被当成当前应用的成功结果。
+    return isCurrentPage(sequence, requestedAppId)
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return false
     message.error(getErrorMessage(error, fallback))
     return false
   }
 }
 
 const loadPage = async () => {
+  const sequence = ++pageLoadSequence
+  const requestedAppId = appId.value
+  // 让旧应用的历史请求即使稍后返回，也不能清理新应用的 loading 状态。
+  ++historyRequestSequence
+  historyRequestAppId = ''
+  historyLoading.value = false
   loadError.value = ''
   // 先清空旧应用状态，避免路由复用或版本接口失败时继续展示旧应用内容。
   eventSource?.close()
@@ -497,17 +615,22 @@ const loadPage = async () => {
   versions.value = []
   prompt.value = ''
   streamOutput.value = ''
+  thinkingOutput.value = ''
   diffOpen.value = false
   diffResult.value = null
   diffFrom.value = 0
   diffTo.value = 0
   summaryOpen.value = false
+  summaryLoading.value = false
   detailOpen.value = false
   editOpen.value = false
+  editSaving.value = false
+  collaboratorSaving.value = false
   expandedHistory.value = new Set<string>()
   resetHistory()
   try {
-    const historyLoaded = await loadAll()
+    const historyLoaded = await loadAll(sequence)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     // loadAll 在异步函数内部填充 ref，显式保留其运行时联合类型，避免 TS 按当前函数内赋值把它收窄为 never。
     const loadedApp = app.value as AppVO | null
     // 只有历史确实加载成功且为空时，才自动使用初始化需求；网络/权限错误不能误触发模型调用。
@@ -517,6 +640,7 @@ const loadPage = async () => {
       sendMessage()
     }
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     loadError.value = getErrorMessage(error, '加载应用失败')
     message.error(loadError.value)
   }
@@ -533,22 +657,33 @@ const sendMessage = () => {
   }
   streaming.value = true
   streamOutput.value = ''
-  const source = new EventSource(createCodeStreamUrl(appId.value, prompt.value.trim()), { withCredentials: true })
+  thinkingOutput.value = ''
+  const streamAppId = appId.value
+  const streamSequence = pageLoadSequence
+  const source = new EventSource(createCodeStreamUrl(streamAppId, prompt.value.trim()), { withCredentials: true })
   let streamSettled = false
-  let serverErrorHandled = false
   eventSource = source
+  const isCurrentStream = () => isCurrentPage(streamSequence, streamAppId)
   const closeStream = () => {
     if (streamSettled) return false
     streamSettled = true
     source.close()
     if (eventSource === source) eventSource = null
-    streaming.value = false
-    return true
+    if (isCurrentStream()) streaming.value = false
+    return isCurrentStream()
   }
   source.onmessage = (event) => {
+    if (!isCurrentStream()) {
+      source.close()
+      return
+    }
     try {
-      const payload = JSON.parse(event.data) as { d?: string }
-      streamOutput.value += payload.d || ''
+      const payload = JSON.parse(event.data) as StreamMessagePayload
+      if (payload.type) {
+        appendStreamMessage(payload)
+      } else {
+        streamOutput.value += payload.d || event.data
+      }
     } catch {
       streamOutput.value += event.data
     }
@@ -569,8 +704,9 @@ const sendMessage = () => {
       message.info('本次生成已取消，已有版本仍然可用')
     })()
   })
-  source.addEventListener('error', (event) => {
-    serverErrorHandled = true
+  // 服务端业务错误和网络错误都通过 EventSource 的 error 事件到达；统一处理，避免
+  // 同时注册 addEventListener 与 onerror 后发生双重提示或依赖触发顺序。
+  source.addEventListener('error', (event: Event) => {
     if (!closeStream()) return
     const customEvent = event as MessageEvent<string>
     try {
@@ -581,76 +717,102 @@ const sendMessage = () => {
     }
     void refreshApp()
   })
-  source.onerror = () => {
-    if (serverErrorHandled) return
-    if (!closeStream()) return
-    message.error('SSE 连接中断，请查看应用状态后重试')
-    void refreshApp()
-  }
 }
 
 const stop = async () => {
   if (!canEdit.value) return
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
+  const requestedEventSource = eventSource
   try {
-    const response = await stopGeneration(appId.value)
+    const response = await stopGeneration(requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) {
       throw new Error(response.data.message || '当前没有可停止的生成任务')
     }
     message.info('已请求停止生成')
-    eventSource?.close()
-    eventSource = null
+    if (eventSource === requestedEventSource) {
+      eventSource?.close()
+      eventSource = null
+    }
     streaming.value = false
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '停止生成失败'))
   } finally {
-    await refreshApp()
+    if (isCurrentPage(sequence, requestedAppId)) {
+      await refreshApp('刷新应用状态失败', sequence, requestedAppId)
+    }
   }
 }
 
 const deploy = async () => {
   if (!canManage.value) return
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
   try {
-    const response = await deployApp(appId.value)
+    const response = await deployApp(requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
-    if (await refreshApp('部署成功，但刷新应用状态失败')) message.success('部署完成')
+    if (await refreshApp('部署成功，但刷新应用状态失败', sequence, requestedAppId)) message.success('部署完成')
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '部署失败'))
   }
 }
 
 const disable = async () => {
   if (!canManage.value) return
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
   try {
-    const response = await disableDeployment(appId.value)
+    const response = await disableDeployment(requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
-    if (await refreshApp('暂停成功，但刷新应用状态失败')) message.success('部署访问已暂停')
+    if (await refreshApp('暂停成功，但刷新应用状态失败', sequence, requestedAppId)) {
+      message.success('部署访问已暂停')
+    }
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '暂停部署失败'))
   }
 }
 
 const enable = async () => {
   if (!canManage.value) return
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
   try {
-    const response = await enableDeployment(appId.value)
+    const response = await enableDeployment(requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
-    if (await refreshApp('恢复成功，但刷新应用状态失败')) message.success('部署访问已恢复')
+    if (await refreshApp('恢复成功，但刷新应用状态失败', sequence, requestedAppId)) {
+      message.success('部署访问已恢复')
+    }
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '恢复部署失败'))
   }
 }
 
 const rollback = (versionNo: number) => {
   if (!canManage.value) return
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
   Modal.confirm({
     title: `回滚到 v${versionNo}？`,
     content: '回滚只切换当前版本指针，不会删除其他版本。',
     onOk: async () => {
+      if (!isCurrentPage(sequence, requestedAppId)) return
       try {
-        const response = await rollbackVersion(appId.value, versionNo)
+        const response = await rollbackVersion(requestedAppId, versionNo)
+        if (!isCurrentPage(sequence, requestedAppId)) return
         if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
-        if (await refreshApp('回滚成功，但刷新应用状态失败')) message.success(`已切换到 v${versionNo}`)
+        if (await refreshApp('回滚成功，但刷新应用状态失败', sequence, requestedAppId)) {
+          message.success(`已切换到 v${versionNo}`)
+        }
       } catch (error) {
+        if (!isCurrentPage(sequence, requestedAppId)) return
         message.error(getErrorMessage(error, '回滚失败'))
       }
     },
@@ -674,6 +836,8 @@ const openEdit = () => {
 
 const saveEdit = async () => {
   if (!app.value) return
+  const requestedAppId = app.value.id
+  const sequence = pageLoadSequence
   if (!editForm.appName.trim()) {
     message.warning('应用名称不能为空')
     return
@@ -681,7 +845,7 @@ const saveEdit = async () => {
   editSaving.value = true
   try {
     const payload = {
-      id: app.value.id,
+      id: requestedAppId,
       appName: editForm.appName.trim(),
       category: editForm.category.trim(),
       tags: editForm.tags.trim(),
@@ -691,30 +855,38 @@ const saveEdit = async () => {
     const response = userStore.isAdmin && userStore.user?.id !== app.value.userId
       ? await adminUpdateApp(payload)
       : await updateApp(payload)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0) throw new Error(response.data.message)
     editOpen.value = false
-    await loadAll()
+    await refreshApp('应用资料已保存，但刷新状态失败', sequence, requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.success('应用资料已更新')
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(error instanceof Error ? error.message : '更新失败')
   } finally {
-    editSaving.value = false
+    if (isCurrentPage(sequence, requestedAppId)) editSaving.value = false
   }
 }
 
 const removeApp = () => {
   if (!app.value || !canManage.value) return
+  const requestedAppId = app.value.id
+  const sequence = pageLoadSequence
   Modal.confirm({
     title: '确认删除这个应用？',
     content: '应用版本、对话记录和已部署文件都会被删除，且无法恢复。',
     okType: 'danger',
     onOk: async () => {
+      if (!isCurrentPage(sequence, requestedAppId)) return
       try {
-        const response = await deleteApp(app.value!.id)
+        const response = await deleteApp(requestedAppId)
+        if (!isCurrentPage(sequence, requestedAppId)) return
         if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
         message.success('应用已删除')
         await router.push('/')
       } catch (error) {
+        if (!isCurrentPage(sequence, requestedAppId)) return
         message.error(getErrorMessage(error, '删除应用失败'))
       }
     },
@@ -723,13 +895,17 @@ const removeApp = () => {
 
 const applyForFeatured = async () => {
   if (!app.value || !canApplyFeatured.value) return
+  const requestedAppId = app.value.id
+  const sequence = pageLoadSequence
   try {
-    const response = await applyFeatured(app.value.id, '希望展示给其他学习者')
+    const response = await applyFeatured(requestedAppId, '希望展示给其他学习者')
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
-    if (await refreshApp('申请成功，但刷新应用状态失败')) {
+    if (await refreshApp('申请成功，但刷新应用状态失败', sequence, requestedAppId)) {
       message.success('精选申请已提交，等待管理员审核')
     }
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '申请精选失败'))
   }
 }
@@ -743,19 +919,26 @@ const showDiff = async () => {
     message.warning('请选择两个不同的版本')
     return
   }
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
   try {
-    const response = await diffVersions(appId.value, diffFrom.value, diffTo.value)
+    const response = await diffVersions(requestedAppId, diffFrom.value, diffTo.value)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     diffResult.value = response.data.data
     diffOpen.value = true
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '版本比较失败'))
   }
 }
 
 const exportHistory = async () => {
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
   try {
-    const response = await exportChatHistory(appId.value)
+    const response = await exportChatHistory(requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     const contentType = String(response.headers['content-type'] || '').toLowerCase()
     if (contentType.includes('application/json')) {
       const raw = response.data instanceof Blob ? await response.data.text() : ''
@@ -778,6 +961,7 @@ const exportHistory = async () => {
     URL.revokeObjectURL(url)
     message.success('对话历史已导出')
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '导出对话历史失败'))
   }
 }
@@ -788,15 +972,20 @@ const summarizeHistory = async () => {
     return
   }
   if (summaryLoading.value || streaming.value) return
+  const requestedAppId = appId.value
+  const sequence = pageLoadSequence
   summaryLoading.value = true
   try {
-    const response = await summarizeChatHistory(appId.value)
+    const response = await summarizeChatHistory(requestedAppId)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     summary.value = response.data.data
     summaryOpen.value = true
-    await loadHistoryStats()
+    await loadHistoryStats(requestedAppId, sequence)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.success('对话摘要已生成')
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     const errorMessage = getErrorMessage(error, '生成对话摘要失败')
     if (errorMessage.toLowerCase().includes('timeout')) {
       message.warning('摘要请求等待超时，后端可能仍在处理，请稍后刷新查看摘要状态，避免重复提交')
@@ -804,12 +993,14 @@ const summarizeHistory = async () => {
       message.error(errorMessage)
     }
   } finally {
-    summaryLoading.value = false
+    if (isCurrentPage(sequence, requestedAppId)) summaryLoading.value = false
   }
 }
 
 const saveCollaborator = async () => {
   if (!app.value || !canManage.value) return
+  const requestedAppId = app.value.id
+  const sequence = pageLoadSequence
   const account = collaboratorAccount.value.trim()
   if (!account) {
     message.warning('请输入协作者的用户账号')
@@ -817,30 +1008,39 @@ const saveCollaborator = async () => {
   }
   collaboratorSaving.value = true
   try {
-    const response = await addCollaborator({ appId: app.value.id, userAccount: account, role: collaboratorRole.value })
+    const response = await addCollaborator({ appId: requestedAppId, userAccount: account, role: collaboratorRole.value })
+    if (!isCurrentPage(sequence, requestedAppId)) return
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     collaboratorAccount.value = ''
-    await loadCollaborators()
+    await loadCollaborators(requestedAppId, sequence)
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.success('协作者已保存')
   } catch (error) {
+    if (!isCurrentPage(sequence, requestedAppId)) return
     message.error(getErrorMessage(error, '保存协作者失败'))
   } finally {
-    collaboratorSaving.value = false
+    if (isCurrentPage(sequence, requestedAppId)) collaboratorSaving.value = false
   }
 }
 
 const removeCollaborator = (userId: string) => {
   if (!app.value || !canManage.value) return
+  const requestedAppId = app.value.id
+  const sequence = pageLoadSequence
   Modal.confirm({
     title: '确认移除该协作者？',
     content: '移除后，该用户将不能继续查看或编辑这个应用。',
     onOk: async () => {
+      if (!isCurrentPage(sequence, requestedAppId)) return
       try {
-        const response = await removeCollaboratorRequest({ appId: app.value!.id, userId })
+        const response = await removeCollaboratorRequest({ appId: requestedAppId, userId })
+        if (!isCurrentPage(sequence, requestedAppId)) return
         if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
-        await loadCollaborators()
+        await loadCollaborators(requestedAppId, sequence)
+        if (!isCurrentPage(sequence, requestedAppId)) return
         message.success('协作者已移除')
       } catch (error) {
+        if (!isCurrentPage(sequence, requestedAppId)) return
         message.error(getErrorMessage(error, '移除协作者失败'))
       }
     },
@@ -875,7 +1075,12 @@ const statusColor = (status: AppGenerationStatus) => ({
 
 onMounted(() => void loadPage())
 watch(appId, () => void loadPage())
-onBeforeUnmount(() => eventSource?.close())
+onBeforeUnmount(() => {
+  ++pageLoadSequence
+  ++historyRequestSequence
+  eventSource?.close()
+  eventSource = null
+})
 </script>
 
 <style scoped>
@@ -907,6 +1112,20 @@ onBeforeUnmount(() => eventSource?.close())
   word-break: break-word;
   background: #111827;
   border-radius: 8px;
+}
+
+.thinking-panel {
+  margin-top: 12px;
+  background: #f8fafc;
+  border-radius: 8px;
+}
+
+.thinking-output {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .preview-frame-wrap {

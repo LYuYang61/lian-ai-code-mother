@@ -4,7 +4,7 @@
       <div class="hero-copy">
         <a-typography-title :level="1">用一句话生成自己的网页应用</a-typography-title>
         <a-typography-paragraph class="subtitle">
-          这是第四期的完整练习入口：登录、创建应用、通过 SSE 观察 AI 输出、保存版本并部署预览。
+          这是工程生成练习入口：登录、创建应用、通过 SSE 观察 AI 与工具调用、保存版本并部署预览。
         </a-typography-paragraph>
         <a-space wrap>
           <a-tag color="blue">Spring Boot 3.5</a-tag>
@@ -30,7 +30,7 @@
           <a-card hoverable class="app-card" @click="openApp(app.id)">
             <div class="app-card-cover">
               <img v-if="app.cover" :src="app.cover" :alt="app.appName" class="app-card-cover-image" />
-              <span v-else>{{ app.codeGenType === 'multi_file' ? '多文件网页' : 'HTML 网页' }}</span>
+              <span v-else>{{ codeGenTypeText(app.codeGenType) }}</span>
             </div>
             <a-typography-title :level="5" ellipsis>{{ app.appName }}</a-typography-title>
             <a-space wrap size="small">
@@ -77,6 +77,7 @@
           <a-radio-group v-model:value="createForm.codeGenType">
             <a-radio value="html">单 HTML</a-radio>
             <a-radio value="multi_file">HTML + CSS + JS</a-radio>
+            <a-radio value="vue_project">Vue3 工程</a-radio>
           </a-radio-group>
         </a-form-item>
         <a-form-item label="可见范围">
@@ -97,7 +98,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import { createApp, listCollaboratedApps, listFeaturedApps, listMyApps } from '@/api/app'
-import type { AppGenerationStatus, AppVO } from '@/api/types'
+import type { AppGenerationStatus, AppVO, CodeGenType } from '@/api/types'
 import { useUserStore } from '@/stores/user'
 
 const router = useRouter()
@@ -118,7 +119,7 @@ const createOpen = ref(false)
 const creating = ref(false)
 const createForm = reactive({
   initPrompt: '',
-  codeGenType: 'html' as 'html' | 'multi_file',
+  codeGenType: 'html' as CodeGenType,
   visibility: 'private' as 'private' | 'public',
   category: '',
   tags: '',
@@ -136,7 +137,7 @@ const loadFeatured = async () => {
     })
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     featured.value = response.data.data.records
-    featuredTotal.value = response.data.data.total
+    featuredTotal.value = Number(response.data.data.total)
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载精选应用失败')
   } finally {
@@ -150,7 +151,7 @@ const loadMine = async () => {
     const response = await listMyApps({ pageNum: minePage.value, pageSize: minePageSize, sortField: 'updateTime', sortOrder: 'desc' })
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     mine.value = response.data.data.records
-    mineTotal.value = response.data.data.total
+    mineTotal.value = Number(response.data.data.total)
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载我的应用失败')
   }
@@ -177,7 +178,7 @@ const loadCollaborated = async () => {
     })
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
     collaborated.value = response.data.data.records
-    collabTotal.value = response.data.data.total
+    collabTotal.value = Number(response.data.data.total)
     collabLoaded.value = true
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载协作应用失败')
@@ -253,6 +254,11 @@ const handleCreate = async () => {
 
 const openApp = (id: string) => void router.push(`/app/${id}`)
 const splitTags = (tags?: string | null) => (tags ? tags.split(',').filter(Boolean) : [])
+const codeGenTypeText = (type: CodeGenType) => ({
+  html: 'HTML 网页',
+  multi_file: '多文件网页',
+  vue_project: 'Vue3 工程',
+}[type] || '网页应用')
 const statusText = (status: AppGenerationStatus) => ({
   draft: '待生成', generating: '生成中', ready: '已完成', failed: '失败', cancelled: '已取消',
 }[status])
