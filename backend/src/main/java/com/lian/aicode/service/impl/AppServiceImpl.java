@@ -159,6 +159,18 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     }
 
     @Override
+    public PageResult<AppVO> listCollaboratedApps(AppQueryRequest request, UserAccount loginUser) {
+        requireLogin(loginUser);
+        List<Long> appIds = collaboratorService.listCollaboratedAppIds(loginUser.getId());
+        if (appIds.isEmpty()) {
+            return new PageResult<>(List.of(), 1, 12, 0, 0);
+        }
+        // 协作应用的所有者是别人，不能套用“我的应用”的 user_id 过滤；用 id 集合限定范围。
+        QueryWrapper wrapper = buildQueryWrapper(request).in("id", appIds);
+        return pageToVO(request, wrapper, MAX_USER_PAGE_SIZE);
+    }
+
+    @Override
     public PageResult<AppVO> listFeaturedApps(AppQueryRequest request) {
         // 精选列表始终先按 priority 降序，确保 999 等置顶值真的排在 99 精选之前；
         // 普通查询的 sortField 不能意外破坏运营置顶语义。
@@ -462,8 +474,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         App app = requireApp(appId);
         assertReadable(app, loginUser);
         QueryWrapper query = QueryWrapper.create().eq("app_id", appId);
-        // 公开访客只看到当前公开版本，不能通过版本列表枚举历史生成内容和提示词。
-        if (!canManage(app, loginUser)) {
+        // 公开访客只看到当前公开版本，不能通过版本列表枚举历史生成内容和提示词；
+        // editor 协作者可以生成新版本，因此同样允许查看完整版本历史。
+        if (!canManage(app, loginUser) && !collaboratorService.canEdit(app, loginUser)) {
             if (app.getCurrentVersion() == null || app.getCurrentVersion() <= 0) {
                 return List.of();
             }
@@ -515,8 +528,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     public AppVersionDiffVO diff(Long appId, Integer fromVersion, Integer toVersion, UserAccount loginUser) {
         App app = requireApp(appId);
         assertReadable(app, loginUser);
-        if (!canManage(app, loginUser)) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者或管理员可以比较历史版本");
+        if (!canManage(app, loginUser) && !collaboratorService.canEdit(app, loginUser)) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "只有应用创建者、编辑协作者或管理员可以比较历史版本");
         }
         AppVersion from = requireReadyVersion(appId, fromVersion);
         AppVersion to = requireReadyVersion(appId, toVersion);

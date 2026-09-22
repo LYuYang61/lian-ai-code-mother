@@ -92,11 +92,26 @@ export function listHistory(appId: string) {
   return request.get<BaseResponse<ChatHistoryVO[]>>('/app/chat/history', { params: { appId } })
 }
 
+export function listCollaboratedApps(data: {
+  pageNum: number
+  pageSize: number
+  searchText?: string
+  sortField?: string
+  sortOrder?: string
+}) {
+  return request.post<BaseResponse<PageResult<AppVO>>>('/app/collaborated/list/page/vo', data)
+}
+
 export function listCollaborators(appId: string) {
   return request.get<BaseResponse<AppCollaboratorVO[]>>('/app/collaborator/list', { params: { appId } })
 }
 
-export function addCollaborator(data: { appId: string; userId: string; role: AppCollaboratorRole }) {
+export function addCollaborator(data: {
+  appId: string
+  userId?: string
+  userAccount?: string
+  role: AppCollaboratorRole
+}) {
   return request.post<BaseResponse<boolean>>('/app/collaborator/add', data)
 }
 

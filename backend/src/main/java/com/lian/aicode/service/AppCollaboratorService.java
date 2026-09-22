@@ -16,6 +16,9 @@ public interface AppCollaboratorService {
 
     List<AppCollaboratorVO> list(Long appId, UserAccount operator);
 
+    /** 当前用户作为协作者参与的全部应用 id（含 viewer 和 editor），按加入时间倒序。 */
+    List<Long> listCollaboratedAppIds(Long userId);
+
     boolean add(AppCollaboratorRequest request, UserAccount operator);
 
     boolean remove(AppCollaboratorRequest request, UserAccount operator);

@@ -2,6 +2,7 @@ package com.lian.aicode.service.impl;
 
 import com.lian.aicode.ai.AiCodeGeneratorService;
 import com.lian.aicode.ai.AiCodeGeneratorServiceFactory;
+import com.lian.aicode.ai.model.ConversationSummaryResult;
 import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.mapper.AppChatSummaryMapper;
@@ -44,6 +45,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -171,7 +173,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         log.info("查询应用对话历史：appId={}, pageSize={}, returned={}, hasMore={}",
                 appId, safePageSize, page.size(), hasMore);
         return CursorPageResult.<ChatHistoryVO>builder()
-                .records(page.stream().map(this::toVO).toList())
+                .records(attachUsers(page.stream().map(this::toVO).toList()))
                 .hasMore(hasMore)
                 .nextCreateTime(cursor == null ? null : cursor.getCreateTime())
                 .nextId(cursor == null ? null : cursor.getId())
@@ -188,7 +190,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         List<ChatHistory> ascending = new ArrayList<>(records);
         ascending.sort(Comparator.comparing(ChatHistory::getCreateTime, Comparator.nullsFirst(Comparator.naturalOrder()))
                 .thenComparing(ChatHistory::getId, Comparator.nullsFirst(Comparator.naturalOrder())));
-        return ascending.stream().map(this::toVO).toList();
+        return attachUsers(ascending.stream().map(this::toVO).toList());
     }
 
     @Override
@@ -208,11 +210,14 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         String sortColumn = sortColumns.getOrDefault(safeRequest.getSortField(), "create_time");
         boolean ascending = "asc".equalsIgnoreCase(safeRequest.getSortOrder())
                 || "ascend".equalsIgnoreCase(safeRequest.getSortOrder());
-        Page<ChatHistory> page = chatHistoryMapper.paginate(Page.of(pageNum, pageSize), query.orderBy(sortColumn, ascending));
+        // 次级固定按时间正序：管理端按应用分组浏览时，同一应用内消息保持聊天时间线顺序。
+        Page<ChatHistory> page = chatHistoryMapper.paginate(Page.of(pageNum, pageSize),
+                query.orderBy(sortColumn, ascending).orderBy("create_time", true));
         long total = page.getTotalRow();
         long pages = total == 0 ? 0 : (total + pageSize - 1) / pageSize;
         log.info("管理员查询对话历史：pageNum={}, pageSize={}, total={}", pageNum, pageSize, total);
-        return new PageResult<>(page.getRecords().stream().map(this::toVO).toList(), pageNum, pageSize, total, pages);
+        return new PageResult<>(attachAppNames(attachUsers(page.getRecords().stream().map(this::toVO).toList())),
+                pageNum, pageSize, total, pages);
     }
 
     @Override
@@ -421,7 +426,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
                 .append("：").append(record.getMessage()).append('\n'));
         String summaryInput = input.length() > MAX_SUMMARY_INPUT_LENGTH
                 ? input.substring(input.length() - MAX_SUMMARY_INPUT_LENGTH) : input.toString();
-        String summaryText = aiService.summarizeConversation(summaryInput);
+        ConversationSummaryResult summaryResult = aiService.summarizeConversation(summaryInput);
+        String summaryText = summaryResult == null ? null : summaryResult.getSummary();
         if (!StringUtils.hasText(summaryText)) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "AI 未返回有效对话摘要");
         }
@@ -557,6 +563,50 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         if (!userService.isAdmin(user)) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "需要管理员权限");
         }
+    }
+
+    /** 批量回填消息所属应用名称，管理后台用它替代长 appId 展示。 */
+    private List<ChatHistoryVO> attachAppNames(List<ChatHistoryVO> records) {
+        if (records == null || records.isEmpty()) {
+            return records == null ? List.of() : records;
+        }
+        Set<Long> appIds = new HashSet<>();
+        records.stream().map(ChatHistoryVO::getAppId).filter(id -> id != null).forEach(appIds::add);
+        if (appIds.isEmpty()) {
+            return records;
+        }
+        Map<Long, App> appMap = new HashMap<>();
+        appMapper.selectListByQuery(QueryWrapper.create().in("id", appIds))
+                .forEach(app -> appMap.put(app.getId(), app));
+        for (ChatHistoryVO record : records) {
+            App app = appMap.get(record.getAppId());
+            if (app != null) {
+                record.setAppName(app.getAppName());
+            }
+        }
+        return records;
+    }
+
+    /** 批量回填消息发送者的账号与昵称，协作者场景下前端需要区分“我”和其他成员。 */
+    private List<ChatHistoryVO> attachUsers(List<ChatHistoryVO> records) {
+        if (records == null || records.isEmpty()) {
+            return records == null ? List.of() : records;
+        }
+        Set<Long> userIds = new HashSet<>();
+        records.stream().map(ChatHistoryVO::getUserId).filter(id -> id != null).forEach(userIds::add);
+        if (userIds.isEmpty()) {
+            return records;
+        }
+        Map<Long, UserAccount> userMap = new HashMap<>();
+        userService.findAllByIds(userIds).forEach(user -> userMap.put(user.getId(), user));
+        for (ChatHistoryVO record : records) {
+            UserAccount sender = userMap.get(record.getUserId());
+            if (sender != null) {
+                record.setUserAccount(sender.getUserAccount());
+                record.setUserName(sender.getUserName());
+            }
+        }
+        return records;
     }
 
     private ChatHistoryVO toVO(ChatHistory history) {

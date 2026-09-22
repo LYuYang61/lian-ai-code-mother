@@ -120,6 +120,14 @@ public class AppController {
         return ResultUtils.success(appService.listMyApps(request, userService.getLoginUser(httpRequest)));
     }
 
+    @Operation(summary = "分页查询我协作的应用")
+    @PostMapping("/collaborated/list/page/vo")
+    public BaseResponse<PageResult<AppVO>> listCollaborated(@Valid @RequestBody AppQueryRequest request,
+                                                            HttpServletRequest httpRequest) {
+        return ResultUtils.success(
+                appService.listCollaboratedApps(request, userService.getLoginUser(httpRequest)));
+    }
+
     @Operation(summary = "分页查询精选公开应用")
     @PostMapping("/good/list/page/vo")
     public BaseResponse<PageResult<AppVO>> listGood(@Valid @RequestBody AppQueryRequest request) {

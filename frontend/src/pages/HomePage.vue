@@ -44,9 +44,12 @@
         :total="featuredTotal" show-less-items @change="loadFeatured" />
     </a-card>
 
-    <a-card v-if="userStore.isLogin" title="我的应用" :bordered="false" class="section-card">
-      <template #extra><a-button type="link" @click="loadMine">刷新</a-button></template>
-      <a-list v-if="mine.length" :data-source="mine" item-layout="horizontal">
+    <a-card v-if="userStore.isLogin" :bordered="false" class="section-card">
+      <template #title>
+        <a-segmented v-model:value="appTab" :options="appTabOptions" @change="handleTabChange" />
+      </template>
+      <template #extra><a-button type="link" @click="refreshActiveTab">刷新</a-button></template>
+      <a-list v-if="activeApps.length" :data-source="activeApps" item-layout="horizontal">
         <template #renderItem="{ item }">
           <a-list-item>
             <a-list-item-meta :title="item.appName" :description="item.generationMessage || item.initPrompt">
@@ -59,9 +62,9 @@
           </a-list-item>
         </template>
       </a-list>
-      <a-empty v-else description="还没有应用，先创建一个吧" />
-      <a-pagination v-if="mineTotal > minePageSize" v-model:current="minePage" :page-size="minePageSize"
-        :total="mineTotal" show-less-items @change="loadMine" />
+      <a-empty v-else :description="appTab === 'mine' ? '还没有应用，先创建一个吧' : '还没有协作应用，被添加为协作者后会出现在这里'" />
+      <a-pagination v-if="activeTotal > minePageSize" v-model:current="activePage" :page-size="minePageSize"
+        :total="activeTotal" show-less-items @change="handleActivePageChange" />
     </a-card>
 
     <a-modal v-model:open="createOpen" title="创建 AI 应用" :confirm-loading="creating" @ok="handleCreate">
@@ -90,10 +93,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
-import { createApp, listFeaturedApps, listMyApps } from '@/api/app'
+import { createApp, listCollaboratedApps, listFeaturedApps, listMyApps } from '@/api/app'
 import type { AppGenerationStatus, AppVO } from '@/api/types'
 import { useUserStore } from '@/stores/user'
 
@@ -150,6 +153,70 @@ const loadMine = async () => {
     mineTotal.value = response.data.data.total
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载我的应用失败')
+  }
+}
+
+const appTab = ref<'mine' | 'collaborated'>('mine')
+const appTabOptions = [
+  { label: '我的应用', value: 'mine' },
+  { label: '协作应用', value: 'collaborated' },
+]
+const collaborated = ref<AppVO[]>([])
+const collabPage = ref(1)
+const collabTotal = ref(0)
+const collabLoaded = ref(false)
+
+const loadCollaborated = async () => {
+  if (!userStore.isLogin) return
+  try {
+    const response = await listCollaboratedApps({
+      pageNum: collabPage.value,
+      pageSize: minePageSize,
+      sortField: 'updateTime',
+      sortOrder: 'desc',
+    })
+    if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
+    collaborated.value = response.data.data.records
+    collabTotal.value = response.data.data.total
+    collabLoaded.value = true
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '加载协作应用失败')
+  }
+}
+
+const activeApps = computed(() => (appTab.value === 'mine' ? mine.value : collaborated.value))
+const activeTotal = computed(() => (appTab.value === 'mine' ? mineTotal.value : collabTotal.value))
+const activePage = computed({
+  get: () => (appTab.value === 'mine' ? minePage.value : collabPage.value),
+  set: (value: number) => {
+    if (appTab.value === 'mine') {
+      minePage.value = value
+    } else {
+      collabPage.value = value
+    }
+  },
+})
+
+const handleTabChange = () => {
+  // 协作列表懒加载：首次切换时才请求，避免未参与协作的用户多打一次接口。
+  if (appTab.value === 'collaborated' && !collabLoaded.value) {
+    void loadCollaborated()
+  }
+}
+
+const refreshActiveTab = () => {
+  if (appTab.value === 'mine') {
+    void loadMine()
+  } else {
+    void loadCollaborated()
+  }
+}
+
+const handleActivePageChange = () => {
+  if (appTab.value === 'mine') {
+    void loadMine()
+  } else {
+    void loadCollaborated()
   }
 }
 

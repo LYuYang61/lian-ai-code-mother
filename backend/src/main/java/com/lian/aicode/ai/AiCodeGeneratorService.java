@@ -3,6 +3,7 @@ package com.lian.aicode.ai;
 import com.lian.aicode.ai.model.HtmlCodeResult;
 import com.lian.aicode.ai.model.MultiFileCodeResult;
 import com.lian.aicode.ai.model.AppNameResult;
+import com.lian.aicode.ai.model.ConversationSummaryResult;
 import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
 import reactor.core.publisher.Flux;
@@ -29,7 +30,7 @@ public interface AiCodeGeneratorService {
 
     /** 压缩历史对话，摘要只用于后续模型上下文，不替代数据库原始记录。 */
     @SystemMessage(fromResource = "prompt/chat-summary-system-prompt.txt")
-    String summarizeConversation(@UserMessage String conversation);
+    ConversationSummaryResult summarizeConversation(@UserMessage String conversation);
 
     /**
      * 生成单 HTML 文件的文本流。

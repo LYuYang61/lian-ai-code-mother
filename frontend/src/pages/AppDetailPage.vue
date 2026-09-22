@@ -68,7 +68,7 @@
                   <div class="history-item">
                     <div class="history-item-header">
                       <a-tag :color="historyMessageColor(item.messageType)">
-                        {{ historyMessageText(item.messageType) }}
+                        {{ historySenderText(item) }}
                       </a-tag>
                       <a-button v-if="(item.message || '').length > 120" type="link" size="small"
                         class="history-toggle" @click="toggleHistory(item.id)">
@@ -86,22 +86,26 @@
           <a-empty v-else-if="!historyError" description="还没有对话记录" />
         </a-card>
 
-        <a-card v-if="canManage" title="协作者" :bordered="false" class="panel-card">
-          <a-space wrap>
-            <a-input v-model:value="collaboratorUserId" style="width: 150px" placeholder="用户 ID" />
+        <a-card v-if="canViewMembers" title="协作者" :bordered="false" class="panel-card">
+          <a-space v-if="canManage" wrap>
+            <a-input v-model:value="collaboratorAccount" style="width: 160px" placeholder="用户账号，如 qing"
+              @keydown.enter="saveCollaborator" />
             <a-select v-model:value="collaboratorRole" style="width: 110px">
               <a-select-option value="editor">可编辑</a-select-option>
               <a-select-option value="viewer">只读</a-select-option>
             </a-select>
             <a-button type="primary" :loading="collaboratorSaving" @click="saveCollaborator">添加/更新</a-button>
           </a-space>
-          <a-list v-if="collaborators.length" size="small" class="collaborator-list">
+          <a-list v-if="collaborators.length" :data-source="collaborators" size="small" class="collaborator-list">
             <template #renderItem="{ item }">
               <a-list-item>
                 <span>{{ item.userName || item.userAccount || item.userId }}</span>
                 <a-space>
-                  <a-tag>{{ item.role === 'editor' ? '可编辑' : '只读' }}</a-tag>
-                  <a-button type="link" danger size="small" @click="removeCollaborator(item.userId)">移除</a-button>
+                  <a-tag :color="item.role === 'owner' ? 'gold' : item.role === 'editor' ? 'blue' : 'default'">
+                    {{ item.role === 'owner' ? '创建者' : item.role === 'editor' ? '可编辑' : '只读' }}
+                  </a-tag>
+                  <a-button v-if="canManage && item.role !== 'owner'" type="link" danger size="small"
+                    @click="removeCollaborator(item.userId)">移除</a-button>
                 </a-space>
               </a-list-item>
             </template>
@@ -281,7 +285,7 @@ const summary = ref<ChatSummaryVO | null>(null)
 const summaryOpen = ref(false)
 const summaryLoading = ref(false)
 const collaborators = ref<AppCollaboratorVO[]>([])
-const collaboratorUserId = ref('')
+const collaboratorAccount = ref('')
 const collaboratorRole = ref<AppCollaboratorRole>('editor')
 const collaboratorSaving = ref(false)
 // 对话历史限高滚动容器；最新消息在底部，加载后自动滚到底部。
@@ -327,6 +331,12 @@ const appId = computed(() => String(route.params.id))
 const canManage = computed(() => {
   if (!app.value || !userStore.isLogin) return false
   return userStore.isAdmin || userStore.user?.id === app.value.userId
+})
+
+// 成员名单对创建者、管理员和所有协作者可见；添加/移除控件仍仅限 canManage。
+const canViewMembers = computed(() => {
+  if (!app.value || !userStore.isLogin) return false
+  return canManage.value || collaborators.value.some((item) => item.userId === userStore.user?.id)
 })
 // 管理员可以运营应用，但不能代替创建者发起 AI 生成，避免误触发他人的模型费用。
 const canEdit = computed(() => {
@@ -800,16 +810,16 @@ const summarizeHistory = async () => {
 
 const saveCollaborator = async () => {
   if (!app.value || !canManage.value) return
-  const userId = collaboratorUserId.value.trim()
-  if (!/^\d+$/.test(userId) || userId === app.value.userId) {
-    message.warning('请输入有效的协作者用户 ID，且不能是应用创建者')
+  const account = collaboratorAccount.value.trim()
+  if (!account) {
+    message.warning('请输入协作者的用户账号')
     return
   }
   collaboratorSaving.value = true
   try {
-    const response = await addCollaborator({ appId: app.value.id, userId, role: collaboratorRole.value })
+    const response = await addCollaborator({ appId: app.value.id, userAccount: account, role: collaboratorRole.value })
     if (response.data.code !== 0 || !response.data.data) throw new Error(response.data.message)
-    collaboratorUserId.value = ''
+    collaboratorAccount.value = ''
     await loadCollaborators()
     message.success('协作者已保存')
   } catch (error) {
@@ -842,6 +852,13 @@ const historyMessageText = (messageType: ChatHistoryVO['messageType']) => ({
   ai: 'AI',
   error: '状态',
 }[messageType])
+
+const historySenderText = (item: ChatHistoryVO) => {
+  if (item.messageType === 'user') {
+    return item.userId === userStore.user?.id ? '我' : (item.userName || item.userAccount || '成员')
+  }
+  return historyMessageText(item.messageType)
+}
 
 const historyMessageColor = (messageType: ChatHistoryVO['messageType']) => ({
   user: 'blue',

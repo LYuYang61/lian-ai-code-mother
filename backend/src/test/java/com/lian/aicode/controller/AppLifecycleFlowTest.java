@@ -111,6 +111,12 @@ class AppLifecycleFlowTest {
                                 + collaborator.getId() + "\",\"role\":\"viewer\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data").value(true));
+        mockMvc.perform(post("/app/collaborated/list/page/vo").session(collaboratorSession)
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"pageNum\":1,\"pageSize\":10}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.records.length()").value(1))
+                .andExpect(jsonPath("$.data.records[0].id").value(appId));
         mockMvc.perform(get("/app/get/vo").param("id", appId).session(collaboratorSession))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value(appId));
@@ -170,7 +176,9 @@ class AppLifecycleFlowTest {
         mockMvc.perform(get("/chatHistory/app/" + appId + "/export").session(ownerSession))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("任务工作台 对话历史")));
-        when(aiCodeGeneratorService.summarizeConversation(anyString())).thenReturn("任务页面已经完成第一版和第二版迭代。");
+        com.lian.aicode.ai.model.ConversationSummaryResult summaryResult = new com.lian.aicode.ai.model.ConversationSummaryResult();
+        summaryResult.setSummary("任务页面已经完成第一版和第二版迭代。");
+        when(aiCodeGeneratorService.summarizeConversation(anyString())).thenReturn(summaryResult);
         mockMvc.perform(post("/chatHistory/app/" + appId + "/summarize").session(ownerSession))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.summary").value(containsString("任务页面")));

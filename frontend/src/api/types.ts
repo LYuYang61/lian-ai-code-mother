@@ -73,7 +73,10 @@ export interface AppVersionVO {
 export interface ChatHistoryVO {
   id: string
   appId: string
+  appName?: string | null
   userId: string
+  userAccount?: string | null
+  userName?: string | null
   message: string
   messageType: 'user' | 'ai' | 'error'
   parentId?: string | null
@@ -115,7 +118,7 @@ export interface AppCollaboratorVO {
   userAccount?: string | null
   userName?: string | null
   userAvatar?: string | null
-  role: AppCollaboratorRole
+  role: AppCollaboratorRole | 'owner'
   createTime?: string | null
 }
 

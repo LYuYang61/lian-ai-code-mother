@@ -28,6 +28,9 @@ public interface AppService {
 
     PageResult<AppVO> listMyApps(AppQueryRequest request, UserAccount loginUser);
 
+    /** 当前用户作为协作者参与的应用分页列表。 */
+    PageResult<AppVO> listCollaboratedApps(AppQueryRequest request, UserAccount loginUser);
+
     PageResult<AppVO> listFeaturedApps(AppQueryRequest request);
 
     PageResult<AppVO> listAdminApps(AppQueryRequest request);
