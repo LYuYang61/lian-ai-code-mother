@@ -77,6 +77,7 @@ const columns = [
   { title: '所有者', key: 'owner', dataIndex: ['owner', 'userName'] },
   { title: '状态', key: 'status' },
   { title: '优先级', key: 'priority' },
+  { title: '下载次数', key: 'downloadCount', dataIndex: 'downloadCount' },
   { title: '操作', key: 'action' },
 ]
 

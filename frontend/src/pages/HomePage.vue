@@ -29,8 +29,8 @@
         <a-col v-for="app in featured" :key="app.id" :xs="24" :sm="12" :lg="8" :xl="6">
           <a-card hoverable class="app-card" @click="openApp(app.id)">
             <div class="app-card-cover">
-              <img v-if="app.cover" :src="app.cover" :alt="app.appName" class="app-card-cover-image" />
-              <span v-else>{{ codeGenTypeText(app.codeGenType) }}</span>
+              <img :src="app.cover || defaultCover" :alt="app.appName" class="app-card-cover-image"
+                @error="handleCoverError" />
             </div>
             <a-typography-title :level="5" ellipsis>{{ app.appName }}</a-typography-title>
             <a-space wrap size="small">
@@ -75,6 +75,7 @@
         </a-form-item>
         <a-form-item label="代码模式">
           <a-radio-group v-model:value="createForm.codeGenType">
+            <a-radio value="auto">AI 智能选择</a-radio>
             <a-radio value="html">单 HTML</a-radio>
             <a-radio value="multi_file">HTML + CSS + JS</a-radio>
             <a-radio value="vue_project">Vue3 工程</a-radio>
@@ -98,7 +99,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import { createApp, listCollaboratedApps, listFeaturedApps, listMyApps } from '@/api/app'
-import type { AppGenerationStatus, AppVO, CodeGenType } from '@/api/types'
+import defaultCover from '@/assets/default-app-cover.svg'
+import type { AppGenerationStatus, AppVO, CodeGenTypeSelection } from '@/api/types'
 import { useUserStore } from '@/stores/user'
 
 const router = useRouter()
@@ -119,7 +121,7 @@ const createOpen = ref(false)
 const creating = ref(false)
 const createForm = reactive({
   initPrompt: '',
-  codeGenType: 'html' as CodeGenType,
+  codeGenType: 'auto' as CodeGenTypeSelection,
   visibility: 'private' as 'private' | 'public',
   category: '',
   tags: '',
@@ -254,11 +256,12 @@ const handleCreate = async () => {
 
 const openApp = (id: string) => void router.push(`/app/${id}`)
 const splitTags = (tags?: string | null) => (tags ? tags.split(',').filter(Boolean) : [])
-const codeGenTypeText = (type: CodeGenType) => ({
-  html: 'HTML 网页',
-  multi_file: '多文件网页',
-  vue_project: 'Vue3 工程',
-}[type] || '网页应用')
+const handleCoverError = (event: Event) => {
+  const image = event.currentTarget as HTMLImageElement | null
+  if (!image || image.dataset.fallbackApplied === 'true') return
+  image.dataset.fallbackApplied = 'true'
+  image.src = defaultCover
+}
 const statusText = (status: AppGenerationStatus) => ({
   draft: '待生成', generating: '生成中', ready: '已完成', failed: '失败', cancelled: '已取消',
 }[status])

@@ -10,7 +10,9 @@
           <a-button v-if="canManage && app.deploymentStatus === 'deployed'" @click="deploy">重新部署当前版本</a-button>
           <a-button v-if="canManage && app.deploymentStatus === 'deployed'" @click="disable">暂停部署</a-button>
           <a-button v-if="canManage && app.deploymentStatus === 'paused'" @click="enable">恢复部署</a-button>
-          <a-button v-if="canManage" @click="download">下载代码</a-button>
+          <a-button v-if="canManage" :loading="downloading"
+            :disabled="app.currentVersion <= 0 || app.generationStatus === 'generating'"
+            @click="download">下载代码</a-button>
         </a-space>
       </template>
     </a-page-header>
@@ -195,6 +197,7 @@
       <a-descriptions-item label="创建者">{{ app.owner?.userName || app.userId }}</a-descriptions-item>
       <a-descriptions-item label="创建时间">{{ app.createTime }}</a-descriptions-item>
       <a-descriptions-item label="生成模式">{{ codeGenTypeText(app.codeGenType) }}</a-descriptions-item>
+      <a-descriptions-item label="下载次数">{{ app.downloadCount }}</a-descriptions-item>
       <a-descriptions-item label="可见范围">{{ app.visibility === 'public' ? '公开' : '私有' }}</a-descriptions-item>
       <a-descriptions-item label="精选状态">{{ app.featuredStatus }}</a-descriptions-item>
       <a-descriptions-item label="对话轮次">{{ app.conversationRounds }}</a-descriptions-item>
@@ -307,6 +310,7 @@ const historyStats = ref<ChatHistoryStatsVO | null>(null)
 const summary = ref<ChatSummaryVO | null>(null)
 const summaryOpen = ref(false)
 const summaryLoading = ref(false)
+const downloading = ref(false)
 const collaborators = ref<AppCollaboratorVO[]>([])
 const collaboratorsError = ref('')
 const collaboratorAccount = ref('')
@@ -819,9 +823,42 @@ const rollback = (versionNo: number) => {
   })
 }
 
-const download = () => {
+const download = async () => {
   if (!canManage.value) return
-  window.open(resolveApiPath(`/app/download?appId=${encodeURIComponent(appId.value)}`), '_blank')
+  if (downloading.value) return
+  downloading.value = true
+  try {
+    const response = await fetch(resolveApiPath(`/app/download?appId=${encodeURIComponent(appId.value)}`), {
+      credentials: 'include',
+    })
+    if (!response.ok) {
+      throw new Error(`下载失败（HTTP ${response.status}）`)
+    }
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const errorBody = await response.json() as { message?: string }
+      throw new Error(errorBody.message || '下载失败')
+    }
+    const blob = await response.blob()
+    const disposition = response.headers.get('content-disposition') || ''
+    const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+    const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    const fileName = encodedName ? decodeURIComponent(encodedName) : (plainName || `app-${appId.value}.zip`)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    // 延迟释放对象 URL，给 Windows 浏览器完成下载导航留出时间。
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+    message.success('代码下载已开始')
+  } catch (error) {
+    message.error(getErrorMessage(error, '下载代码失败'))
+  } finally {
+    downloading.value = false
+  }
 }
 
 const openEdit = () => {

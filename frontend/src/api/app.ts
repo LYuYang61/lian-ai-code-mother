@@ -7,6 +7,7 @@ import type {
   BaseResponse,
   ChatHistoryVO,
   CodeGenType,
+  CodeGenTypeSelection,
   PageResult,
 } from '@/api/types'
 import { API_BASE_URL } from '@/config/env'
@@ -40,7 +41,7 @@ export interface AppQueryRequest {
 
 export function createApp(data: {
   initPrompt: string
-  codeGenType: CodeGenType
+  codeGenType: CodeGenTypeSelection
   category?: string
   tags?: string
   visibility: 'private' | 'public'

@@ -27,6 +27,7 @@ export interface UserVO extends LoginUser {
 }
 
 export type CodeGenType = 'html' | 'multi_file' | 'vue_project'
+export type CodeGenTypeSelection = CodeGenType | 'auto'
 export type AppVisibility = 'private' | 'public'
 export type AppGenerationStatus = 'draft' | 'generating' | 'ready' | 'failed' | 'cancelled'
 export type AppDeploymentStatus = 'undeployed' | 'deployed' | 'paused'
@@ -48,6 +49,7 @@ export interface AppVO {
   currentVersion: number
   deployedVersion?: number | null
   conversationRounds: number
+  downloadCount: number | string
   generationMessage?: string | null
   featuredStatus: string
   featuredReason?: string | null
