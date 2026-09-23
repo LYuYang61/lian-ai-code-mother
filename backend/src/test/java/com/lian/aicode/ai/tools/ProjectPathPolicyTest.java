@@ -1,5 +1,7 @@
 package com.lian.aicode.ai.tools;
 
+import com.lian.aicode.exception.BusinessException;
+import com.lian.aicode.exception.ErrorCode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -8,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** 验证模型文件工具的路径、敏感文件和工程容量边界。 */
@@ -24,6 +27,15 @@ class ProjectPathPolicyTest {
         assertThrows(RuntimeException.class, () -> policy.resolveFile(".env"));
         assertThrows(RuntimeException.class, () -> policy.resolveFile(".npmrc"));
         assertThrows(RuntimeException.class, () -> policy.resolveFile("src/../.env.local"));
+    }
+
+    @Test
+    void rejectsNullPathAsParamsErrorInsteadOfNpe() {
+        // 2026-09-23 实测：模型可能传 null 路径；必须返回参数错误而不是 NullPointerException。
+        ProjectPathPolicy policy = newPolicy(10, 10_000, 2_000);
+
+        BusinessException exception = assertThrows(BusinessException.class, () -> policy.resolveFile(null));
+        assertEquals(ErrorCode.PARAMS_ERROR.getCode(), exception.getCode());
     }
 
     @Test

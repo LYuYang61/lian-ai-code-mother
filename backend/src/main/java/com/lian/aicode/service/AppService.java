@@ -74,4 +74,7 @@ public interface AppService {
     Path getDeployPath(String deployKey);
 
     Path getDownloadPath(Long appId, UserAccount loginUser);
+
+    /** ZIP 完整写出后记录一次成功下载。 */
+    void recordDownload(Long appId, UserAccount loginUser);
 }

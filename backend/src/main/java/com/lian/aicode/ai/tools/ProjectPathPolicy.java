@@ -167,6 +167,10 @@ public final class ProjectPathPolicy {
     }
 
     private String normalizeRelativePath(String value) {
+        // 2026-09-23 实测模型可能传入 null 路径；先判空给出参数错误，而不是让 trim() 抛 NPE。
+        if (value == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件路径不能为空且必须是相对路径");
+        }
         String normalized = value.trim().replace('\\', '/');
         if (normalized.isBlank() || normalized.startsWith("/") || normalized.contains("\u0000")) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件路径不能为空且必须是相对路径");

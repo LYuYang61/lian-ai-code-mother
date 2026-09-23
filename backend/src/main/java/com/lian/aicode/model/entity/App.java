@@ -71,6 +71,10 @@ public class App implements Serializable {
     @Column("conversation_rounds")
     private Integer conversationRounds;
 
+    /** 成功打包下载源代码的次数；由服务端在 ZIP 完整写出后原子累加。 */
+    @Column("download_count")
+    private Integer downloadCount;
+
     @Column("generation_message")
     private String generationMessage;
 

@@ -5,7 +5,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
-/** 创建应用请求；代码生成类型为空时由服务端选择默认 HTML 模式。 */
+/** 创建应用请求；代码生成类型为空或为 auto 时由服务端智能路由。 */
 @Data
 public class AppAddRequest {
 
@@ -13,7 +13,7 @@ public class AppAddRequest {
     @Size(max = 10000, message = "初始化需求不能超过 10000 个字符")
     private String initPrompt;
 
-    /** 接收 html / multi_file 等稳定值，避免把 Java 枚举名称暴露为外部协议。 */
+    /** 接收 auto、html、multi_file、vue_project 等稳定值，避免暴露 Java 枚举名称。 */
     private String codeGenType;
 
     @Size(max = 32, message = "分类不能超过 32 个字符")

@@ -305,7 +305,9 @@ public class AppStorageService {
                     || name.equals(".vscode") || name.equals(".mvn") || name.equals(".env")
                     || name.startsWith(".env.") || name.equals(".npmrc") || name.equals(".yarnrc")
                     || name.equals(".yarnrc.yml") || name.endsWith(".pem") || name.endsWith(".key")
-                    || name.equals("id_rsa") || name.equals("secrets") || name.equals("credentials")) {
+                    || name.equals("id_rsa") || name.equals("secrets") || name.equals("credentials")
+                    || name.equals(".ds_store") || name.endsWith(".log") || name.endsWith(".tmp")
+                    || name.endsWith(".cache")) {
                 return true;
             }
         }

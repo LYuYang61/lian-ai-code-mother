@@ -27,6 +27,10 @@
         <langchain4j.spring.version>1.20.0-beta30</langchain4j.spring.version>
         <!-- Spring Boot 3 使用 Jakarta 版本的 MyBatis-Flex starter。 -->
         <mybatis-flex.version>1.11.8</mybatis-flex.version>
+        <!-- Selenium 4 已内置官方 Selenium Manager，Windows 上不再额外绑定 WebDriverManager。 -->
+        <selenium.version>4.49.0</selenium.version>
+        <!-- 阿里云官方 OSS Java SDK V2；AccessKey 只由 SDK 从进程环境变量读取。 -->
+        <aliyun-oss.version>0.6.0</aliyun-oss.version>
     </properties>
 
     <dependencies>
@@ -132,6 +136,24 @@
             <groupId>com.github.xiaoymin</groupId>
             <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
             <version>${knife4j.version}</version>
+        </dependency>
+
+        <!--
+            第七期网页截图使用 Selenium WebDriver。
+            Selenium Manager 随 selenium-java 发布，负责在 Windows 上匹配 ChromeDriver，
+            因此不再引入教程时代的第三方驱动管理器。
+        -->
+        <dependency>
+            <groupId>org.seleniumhq.selenium</groupId>
+            <artifactId>selenium-java</artifactId>
+            <version>${selenium.version}</version>
+        </dependency>
+
+        <!-- 可选的阿里云 OSS 对象存储；OSS_ENABLED=false 时不会创建客户端。 -->
+        <dependency>
+            <groupId>com.aliyun</groupId>
+            <artifactId>alibabacloud-oss-v2</artifactId>
+            <version>${aliyun-oss.version}</version>
         </dependency>
 
         <dependency>

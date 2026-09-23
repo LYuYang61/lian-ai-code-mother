@@ -11,6 +11,7 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.service.AiServices;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -46,7 +47,7 @@ public class AiCodeGeneratorServiceFactory {
     private final Duration expireAfterAccess;
     private final Cache<Long, AiCodeGeneratorService> appServiceCache;
 
-    public AiCodeGeneratorServiceFactory(ChatModel chatModel,
+    public AiCodeGeneratorServiceFactory(@Qualifier("openAiChatModel") ChatModel chatModel,
                                          StreamingChatModel streamingChatModel,
                                          RedisChatMemoryStore redisChatMemoryStore,
                                          ChatHistoryService chatHistoryService,
@@ -122,7 +123,9 @@ public class AiCodeGeneratorServiceFactory {
                 // 模型偶尔会返回不存在的工具名；把错误交回模型，而不是让请求静默成功。
                 .hallucinatedToolNameStrategy(request -> ToolExecutionResultMessage.from(
                         request, "不存在名为 " + request.name() + " 的工具，请改用已声明的文件工具"))
-                .maxSequentialToolsInvocations(20)
+                // 2026-09-23 实测：关闭思考后模型会认真执行多轮写文件并反复复读校验，
+                // 电商管理后台类需求 20 轮（12 次写入 + 多轮校验读）恰好耗尽上限导致生成失败；放宽到 40。
+                .maxSequentialToolsInvocations(40)
                 .inputGuardrails(new PromptSafetyInputGuardrail())
                 .build();
         log.info("创建 Vue 工程 AI Service：appId={}, excludedMessageId={}, toolCount={}",

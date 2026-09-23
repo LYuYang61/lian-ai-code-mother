@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS app (
     current_version INT NOT NULL DEFAULT 0,
     deployed_version INT,
     conversation_rounds INT NOT NULL DEFAULT 0,
+    download_count INT NOT NULL DEFAULT 0,
     generation_message VARCHAR(512),
     featured_status VARCHAR(16) NOT NULL DEFAULT 'none',
     featured_reason VARCHAR(500),

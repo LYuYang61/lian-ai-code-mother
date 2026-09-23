@@ -2,8 +2,11 @@ package com.lian.aicode.service.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lian.aicode.ai.AiCodeGenTypeRoutingService;
 import com.lian.aicode.ai.AiCodeGeneratorService;
+import com.lian.aicode.ai.CodeGenTypeRoutingHeuristic;
 import com.lian.aicode.ai.model.AppNameResult;
+import com.lian.aicode.ai.model.message.StreamMessageTypeEnum;
 import com.lian.aicode.core.AiCodeGeneratorFacade;
 import com.lian.aicode.core.builder.VueProjectBuilder;
 import com.lian.aicode.core.stream.StreamMessageHistoryFormatter;
@@ -40,6 +43,7 @@ import com.lian.aicode.service.AppStorageService;
 import com.lian.aicode.service.ChatHistoryService;
 import com.lian.aicode.service.GenerationCancelledException;
 import com.lian.aicode.service.GenerationTaskManager;
+import com.lian.aicode.service.ScreenshotService;
 import com.lian.aicode.service.UserService;
 import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.core.query.QueryWrapper;
@@ -69,9 +73,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 应用核心业务实现。
@@ -100,17 +106,22 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     private final ChatHistoryService chatHistoryService;
     private final AiCodeGeneratorFacade aiCodeGeneratorFacade;
     private final ObjectProvider<AiCodeGeneratorService> aiCodeGeneratorServiceProvider;
+    private final ObjectProvider<AiCodeGenTypeRoutingService> aiCodeGenTypeRoutingServiceProvider;
     private final ObjectMapper objectMapper;
     private final AppStorageService storageService;
     private final GenerationTaskManager taskManager;
     private final StreamMessageHistoryFormatter streamMessageHistoryFormatter;
     private final VueProjectBuilder vueProjectBuilder;
+    private final ScreenshotService screenshotService;
 
     @Value("${app.storage.max-prompt-length:10000}")
     private int maxPromptLength;
 
     @Value("${app.deploy.public-base-url:http://localhost:8123/api/site}")
     private String deployPublicBaseUrl;
+
+    @Value("${app.preview.public-base-url:http://localhost:8123/api/preview}")
+    private String previewPublicBaseUrl;
 
     @Value("${server.servlet.context-path:/api}")
     private String serverContextPath;
@@ -119,7 +130,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     public Long createApp(AppAddRequest request, UserAccount loginUser) {
         requireLogin(loginUser);
         String prompt = normalizePrompt(request.getInitPrompt());
-        CodeGenTypeEnum codeGenType = parseCodeGenType(request.getCodeGenType());
+        CodeGenTypeRoutingDecision routingDecision = resolveCodeGenType(
+                request.getCodeGenType(), prompt, loginUser.getUserAccount());
+        CodeGenTypeEnum codeGenType = routingDecision.type();
         String visibility = normalizeVisibility(request.getVisibility());
 
         App app = new App();
@@ -145,8 +158,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             log.error("创建应用失败：actor={}, type={}, result=失败", loginUser.getUserAccount(), codeGenType.getValue());
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "创建应用失败");
         }
-        log.info("创建应用成功：actor={}, appId={}, type={}, visibility={}, result=成功",
-                loginUser.getUserAccount(), app.getId(), codeGenType.getValue(), visibility);
+        log.info("创建应用成功：actor={}, appId={}, type={}, typeSource={}, visibility={}, result=成功",
+                loginUser.getUserAccount(), app.getId(), codeGenType.getValue(), routingDecision.source(), visibility);
         return app.getId();
     }
 
@@ -203,6 +216,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         App app = requireApp(request.getId());
         // 普通资料接口只允许创建者修改；管理员使用 /app/admin/update，避免权限边界被复用接口绕过。
         assertOwner(app, loginUser);
+        String previousCover = app.getCover();
         App update = new App();
         update.setId(app.getId());
         if (request.getAppName() != null) {
@@ -227,6 +241,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         update.setEditTime(LocalDateTime.now());
         update.setUpdateTime(update.getEditTime());
         boolean result = updateById(update);
+        if (result && request.getCover() != null
+                && !Objects.equals(previousCover, update.getCover())) {
+            registerReplacedCoverCleanup(app.getId(), previousCover, loginUser.getUserAccount());
+        }
         log.info("更新应用资料：actor={}, appId={}, result={}", loginUser.getUserAccount(), app.getId(),
                 result ? "成功" : "失败");
         return result;
@@ -236,6 +254,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     @Transactional
     public boolean adminUpdateApp(AppAdminUpdateRequest request, UserAccount operator) {
         App app = requireApp(request.getId());
+        String previousCover = app.getCover();
         App update = new App();
         update.setId(app.getId());
         if (request.getAppName() != null) {
@@ -292,6 +311,11 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         update.setEditTime(LocalDateTime.now());
         update.setUpdateTime(update.getEditTime());
         boolean result = updateById(update);
+        if (result && request.getCover() != null
+                && !Objects.equals(previousCover, update.getCover())) {
+            registerReplacedCoverCleanup(app.getId(), previousCover,
+                    operator == null ? "<unknown>" : operator.getUserAccount());
+        }
         log.info("管理员更新应用运营字段：actor={}, appId={}, featuredStatus={}, priority={}, result={}",
                 operator == null ? "<unknown>" : operator.getUserAccount(), app.getId(),
                 request.getFeaturedStatus(), request.getPriority(), result ? "成功" : "失败");
@@ -324,7 +348,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 // 数据库事务回滚时不能提前删除 Redis 记忆和磁盘文件；提交成功后再做外部资源清理。
                 registerDeleteGuardRelease(appId);
                 deleteGuardRegistered = true;
-                registerDeleteCleanup(appId, app.getDeployKey(), loginUser.getUserAccount());
+                registerDeleteCleanup(appId, app.getDeployKey(), app.getCover(), loginUser.getUserAccount());
             } else {
                 taskManager.finishDelete(appId);
             }
@@ -398,6 +422,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         StringBuilder aiMessage = new StringBuilder();
         AtomicBoolean sourceCompleted = new AtomicBoolean(false);
         AtomicBoolean stateMarked = new AtomicBoolean(false);
+        // 只统计真实成功的 writeFile/modifyFile 工具事件；模型可以把工具记录写成文本，但伪造不出事件信封。
+        AtomicInteger realFileWrites = new AtomicInteger();
         Flux<String> source = aiCodeGeneratorFacade.generateAndSaveCodeStream(
                         appId, prompt, codeGenType,
                         versionDirectory, userHistory.getId(),
@@ -407,6 +433,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                     if (!historyChunk.isBlank() && aiMessage.length() < MAX_CHAT_HISTORY_MESSAGE_LENGTH) {
                         int remaining = MAX_CHAT_HISTORY_MESSAGE_LENGTH - aiMessage.length();
                         aiMessage.append(historyChunk, 0, Math.min(historyChunk.length(), remaining));
+                    }
+                    if (codeGenType == CodeGenTypeEnum.VUE_PROJECT
+                            && isSuccessfulFileWriteEvent(objectMapper, chunk)) {
+                        realFileWrites.incrementAndGet();
                     }
                 })
                 // 门面只有在解析和保存成功后才完成，因此这里是“可用版本”的唯一完成信号。
@@ -419,6 +449,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                         try {
                             // 上游已经完整结束时，停止请求只能算“来晚了”，不能把可用版本改成取消态。
                             if (sourceCompleted.get()) {
+                                if (codeGenType == CodeGenTypeEnum.VUE_PROJECT && realFileWrites.get() == 0) {
+                                    // 2026-09-23 实测：模型可能"读而不写"后正常收尾，产出纯模板的假成功版本。
+                                    // 拒收并按失败收口；异常会经下方 catch 记录原因并向前端透出。
+                                    throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                                            "模型未写入任何工程文件，本版本已作废，请重试或简化需求描述");
+                                }
                                 markGenerationReady(appId, version, userHistory.getId(), loginUser.getUserAccount(),
                                         aiMessage.toString());
                             } else {
@@ -454,6 +490,27 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                             elapsedMillis(startedAt));
                     taskManager.finish(appId, task);
                 });
+    }
+
+    /**
+     * 判定一条流式事件是否为真实成功的文件写入/修改。
+     *
+     * <p>type/name/result 三重判据只有 TokenStreamAdapter 能构造；模型在正文里伪造的
+     * “工具记录”会以 ai_response 事件到达，type 对不上，无法计入。</p>
+     */
+    public static boolean isSuccessfulFileWriteEvent(ObjectMapper mapper, String chunk) {
+        if (chunk == null || !chunk.contains("tool_executed")) {
+            return false;
+        }
+        try {
+            var node = mapper.readTree(chunk);
+            String result = node.path("result").asText("");
+            return StreamMessageTypeEnum.TOOL_EXECUTED.getValue().equals(node.path("type").asText())
+                    && ("writeFile".equals(node.path("name").asText()) || "modifyFile".equals(node.path("name").asText()))
+                    && (result.startsWith("文件写入成功") || result.startsWith("文件修改成功"));
+        } catch (IOException exception) {
+            return false;
+        }
     }
 
     /**
@@ -528,6 +585,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             }
             log.info("部署状态流转：actor={}, appId={}, version={}, from={}, to=deployed, result=成功",
                     actorAccount, appId, version.getVersionNo(), app.getDeploymentStatus());
+            registerAfterCommit(() -> screenshotService.submitIfMissing(appId, version.getVersionNo(),
+                    buildDeployUrl(deployKey), "deploy", actorAccount));
         } catch (RuntimeException exception) {
             if (fileSwitched) {
                 restoreDeploymentAfterDatabaseFailure(appId, oldDeployKey, oldVersionNo, deployKey);
@@ -618,6 +677,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             }
             log.info("版本状态流转：actor={}, appId={}, currentVersion={}, deployedVersion={}, result=回滚成功",
                     loginUser.getUserAccount(), appId, versionNo, update.getDeployedVersion());
+            registerAfterCommit(() -> screenshotService.submitIfMissing(appId, versionNo,
+                    buildPreviewScreenshotUrl(appId, versionNo), "rollback", loginUser.getUserAccount()));
             return true;
         } catch (RuntimeException exception) {
             if (AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus())) {
@@ -729,7 +790,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         }
         AppVersion version = requireReadyVersion(appId, versionNo);
         // 预览是只读请求，不能因为访问页面就触发 npm install/build；构建只在生成完成或显式部署流程中执行。
-        return resolveRuntimeDirectory(version, false);
+        Path runtimeDirectory = resolveRuntimeDirectory(version, false);
+        if (app.getCurrentVersion() != null && app.getCurrentVersion().equals(versionNo)) {
+            screenshotService.submitIfMissing(appId, versionNo, buildPreviewScreenshotUrl(appId, versionNo),
+                    "preview", loginUser == null ? "<anonymous>" : loginUser.getUserAccount());
+        }
+        return runtimeDirectory;
     }
 
     @Override
@@ -744,6 +810,19 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         assertOwnerOrAdmin(app, loginUser);
         AppVersion version = requireReadyVersion(appId, app.getCurrentVersion());
         return storageService.resolveVersionPath(version.getRelativePath());
+    }
+
+    @Override
+    public void recordDownload(Long appId, UserAccount loginUser) {
+        requireLogin(loginUser);
+        App app = requireApp(appId);
+        assertOwnerOrAdmin(app, loginUser);
+        int updated = mapper.incrementDownloadCount(appId);
+        if (updated <= 0) {
+            log.warn("记录应用下载失败：actor={}, appId={}, result=数据库未更新", loginUser.getUserAccount(), appId);
+            return;
+        }
+        log.info("记录应用下载：actor={}, appId={}, result=成功", loginUser.getUserAccount(), appId);
     }
 
     private PageResult<AppVO> pageToVO(AppQueryRequest request, QueryWrapper wrapper, long maxPageSize) {
@@ -840,6 +919,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 "createTime", "create_time",
                 "updateTime", "update_time",
                 "priority", "priority",
+                "downloadCount", "download_count",
                 "appName", "app_name");
         String sortColumn = sortColumns.getOrDefault(request.getSortField(), "create_time");
         boolean ascending = "asc".equalsIgnoreCase(request.getSortOrder())
@@ -969,6 +1049,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         }
         log.info("版本状态流转：actor={}, appId={}, version={}, from=generating, to=ready, result=成功",
                 actorAccount, appId, version.getVersionNo());
+        screenshotService.submitIfMissing(appId, version.getVersionNo(),
+                buildPreviewScreenshotUrl(appId, version.getVersionNo()), "generation-ready", actorAccount);
         if (StringUtils.hasText(aiMessage)) {
             try {
                 chatHistoryService.addMessage(appId, version.getCreatedBy(), aiMessage,
@@ -1072,7 +1154,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
      * <p>数据库逻辑删除和磁盘/Redis 不属于同一个事务；只有提交成功后才清理外部资源，
      * 避免数据库回滚后应用记录还在、但代码文件和会话记忆已经消失。</p>
      */
-    private void registerDeleteCleanup(Long appId, String deployKey, String actorAccount) {
+    private void registerDeleteCleanup(Long appId, String deployKey, String cover, String actorAccount) {
         Runnable cleanup = () -> {
             boolean allSucceeded = true;
             try {
@@ -1094,6 +1176,13 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             } catch (RuntimeException exception) {
                 allSucceeded = false;
                 log.error("清理应用部署文件失败：actor={}, appId={}, reason={}", actorAccount, appId,
+                        exception.getClass().getSimpleName(), exception);
+            }
+            try {
+                screenshotService.deleteCover(cover, appId, actorAccount);
+            } catch (RuntimeException exception) {
+                allSucceeded = false;
+                log.error("清理应用封面失败：actor={}, appId={}, reason={}", actorAccount, appId,
                         exception.getClass().getSimpleName(), exception);
             }
             if (allSucceeded) {
@@ -1225,6 +1314,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 .currentVersion(app.getCurrentVersion())
                 .deployedVersion(app.getDeployedVersion())
                 .conversationRounds(app.getConversationRounds() == null ? 0 : app.getConversationRounds())
+                .downloadCount(app.getDownloadCount() == null ? 0 : app.getDownloadCount())
                 .generationMessage(app.getGenerationMessage())
                 .featuredStatus(app.getFeaturedStatus()).featuredReason(app.getFeaturedReason())
                 .deploymentStatus(app.getDeploymentStatus()).createTime(stringValue(app.getCreateTime()))
@@ -1268,15 +1358,62 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         return fallback.substring(0, Math.min(fallback.length(), 20));
     }
 
-    private CodeGenTypeEnum parseCodeGenType(String value) {
-        if (!StringUtils.hasText(value)) {
-            return CodeGenTypeEnum.HTML;
+    private CodeGenTypeRoutingDecision resolveCodeGenType(String requestedValue, String prompt, String actorAccount) {
+        if (StringUtils.hasText(requestedValue) && !"auto".equalsIgnoreCase(requestedValue.trim())) {
+            CodeGenTypeEnum explicitType = CodeGenTypeEnum.getEnumByValue(requestedValue.trim());
+            if (explicitType == null) {
+                throw new BusinessException(ErrorCode.PARAMS_ERROR, "代码生成类型无效");
+            }
+            log.info("代码生成类型选择：actor={}, type={}, source=explicit", actorAccount, explicitType.getValue());
+            return new CodeGenTypeRoutingDecision(explicitType, "explicit");
         }
-        CodeGenTypeEnum type = CodeGenTypeEnum.getEnumByValue(value.trim());
-        if (type == null) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "代码生成类型无效");
+        AiCodeGenTypeRoutingService routingService = aiCodeGenTypeRoutingServiceProvider.getIfAvailable();
+        if (routingService != null) {
+            try {
+                CodeGenTypeEnum routedType = routingService.routeCodeGenType(prompt);
+                if (routedType != null) {
+                    return new CodeGenTypeRoutingDecision(routedType, "ai");
+                }
+                log.warn("AI 代码类型路由返回空结果：actor={}, result=使用本地回退", actorAccount);
+            } catch (RuntimeException exception) {
+                log.warn("AI 代码类型路由调用异常：actor={}, reason={}, result=使用本地回退",
+                        actorAccount, exception.getClass().getSimpleName());
+            }
         }
-        return type;
+        CodeGenTypeEnum fallback = CodeGenTypeRoutingHeuristic.choose(prompt);
+        log.info("代码生成类型选择：actor={}, type={}, source=heuristic-fallback", actorAccount, fallback.getValue());
+        return new CodeGenTypeRoutingDecision(fallback, "heuristic-fallback");
+    }
+
+    private void registerAfterCommit(Runnable action) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    action.run();
+                }
+            });
+        } else {
+            action.run();
+        }
+    }
+
+    /** 清理被手工封面替换掉的自动封面；清理失败不影响已经提交的资料变更。 */
+    private void registerReplacedCoverCleanup(Long appId, String previousCover, String actorAccount) {
+        if (!StringUtils.hasText(previousCover)) {
+            return;
+        }
+        registerAfterCommit(() -> {
+            try {
+                screenshotService.deleteCover(previousCover, appId, actorAccount);
+            } catch (RuntimeException exception) {
+                log.error("清理被替换应用封面失败：actor={}, appId={}, reason={}, result=需补偿",
+                        actorAccount, appId, exception.getClass().getSimpleName(), exception);
+            }
+        });
+    }
+
+    private record CodeGenTypeRoutingDecision(CodeGenTypeEnum type, String source) {
     }
 
     private String normalizePrompt(String prompt) {
@@ -1348,6 +1485,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             contextPath = "/" + contextPath;
         }
         return contextPath.replaceAll("/+$", "") + "/preview/" + appId + "/" + versionNo + "/";
+    }
+
+    private String buildPreviewScreenshotUrl(Long appId, Integer versionNo) {
+        return previewPublicBaseUrl.replaceAll("/+$", "") + "/" + appId + "/" + versionNo + "/";
     }
 
     private String stringValue(LocalDateTime value) {

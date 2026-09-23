@@ -24,6 +24,7 @@ import com.lian.aicode.model.vo.ChatHistoryVO;
 import com.lian.aicode.model.vo.PageResult;
 import com.lian.aicode.service.AppService;
 import com.lian.aicode.service.GenerationCancelledException;
+import com.lian.aicode.service.ProjectDownloadService;
 import com.lian.aicode.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -45,17 +46,11 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.io.IOException;
-import java.nio.file.FileVisitResult;
-import java.nio.file.SimpleFileVisitor;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 /** 应用 CRUD、AI 生成、版本管理和部署接口。 */
 @Slf4j
@@ -66,6 +61,7 @@ import java.util.zip.ZipOutputStream;
 public class AppController {
 
     private final AppService appService;
+    private final ProjectDownloadService projectDownloadService;
     private final UserService userService;
     private final ObjectMapper objectMapper;
 
@@ -232,9 +228,17 @@ public class AppController {
             response.setContentType("application/zip");
             response.setHeader("Content-Disposition", ContentDisposition.attachment()
                     .filename("app-" + appId + ".zip", StandardCharsets.UTF_8).build().toString());
-            writeZip(directory, response);
-            log.info("下载应用代码完成：actor={}, appId={}, result=成功",
-                    loginUser.getUserAccount(), appId);
+            ProjectDownloadService.DownloadResult result = projectDownloadService.writeZip(
+                    directory, response.getOutputStream());
+            // 只有 ZIP 完整写出后才计数；计数失败不能让已经成功的二进制下载变成错误响应。
+            try {
+                appService.recordDownload(appId, loginUser);
+            } catch (RuntimeException exception) {
+                log.warn("记录应用下载次数失败：actor={}, appId={}, reason={}",
+                        loginUser.getUserAccount(), appId, exception.getClass().getSimpleName());
+            }
+            log.info("下载应用代码完成：actor={}, appId={}, fileCount={}, result=成功",
+                    loginUser.getUserAccount(), appId, result.fileCount());
         } catch (IOException exception) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "下载代码失败", exception);
         }
@@ -343,61 +347,4 @@ public class AppController {
         }
     }
 
-    private void writeZip(Path directory, HttpServletResponse response) throws IOException {
-        if (!Files.isDirectory(directory)) {
-            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "代码目录不存在");
-        }
-        try (ZipOutputStream zip = new ZipOutputStream(response.getOutputStream(), StandardCharsets.UTF_8)) {
-            Files.walkFileTree(directory, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    return !dir.equals(directory) && isBuildArtifact(dir, directory)
-                            ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult visitFile(Path path, BasicFileAttributes attrs) throws IOException {
-                    if (Files.isRegularFile(path) && !Files.isSymbolicLink(path)) {
-                        Path relative = directory.relativize(path).normalize();
-                        if (relative.startsWith("..")) {
-                            throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "非法下载路径");
-                        }
-                        if (isSensitiveProjectPath(relative)) {
-                            return FileVisitResult.CONTINUE;
-                        }
-                        zip.putNextEntry(new ZipEntry(relative.toString().replace('\\', '/')));
-                        Files.copy(path, zip);
-                        zip.closeEntry();
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-            });
-            zip.finish();
-        }
-    }
-
-    private boolean isBuildArtifact(Path path, Path root) {
-        Path relative = root.relativize(path).normalize();
-        for (Path segment : relative) {
-            String name = segment.toString().toLowerCase(Locale.ROOT);
-            if (Set.of("node_modules", "dist", "build", "target", ".git", ".idea", ".vscode", ".mvn")
-                    .contains(name)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isSensitiveProjectPath(Path relative) {
-        for (Path segment : relative) {
-            String name = segment.toString().toLowerCase(Locale.ROOT);
-            if (name.equals(".env") || name.startsWith(".env.") || name.equals(".npmrc")
-                    || name.equals(".yarnrc") || name.equals(".yarnrc.yml")
-                    || name.equals("id_rsa") || name.equals("secrets") || name.equals("credentials")
-                    || name.endsWith(".pem") || name.endsWith(".key")) {
-                return true;
-            }
-        }
-        return false;
-    }
 }
