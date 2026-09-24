@@ -34,6 +34,7 @@
             </div>
             <a-typography-title :level="5" ellipsis>{{ app.appName }}</a-typography-title>
             <a-space wrap size="small">
+              <a-tag color="blue">{{ codeGenTypeText(app.codeGenType) }}</a-tag>
               <a-tag v-if="app.category">{{ app.category }}</a-tag>
               <a-tag v-for="tag in splitTags(app.tags)" :key="tag" color="blue">{{ tag }}</a-tag>
             </a-space>
@@ -55,7 +56,11 @@
             <a-list-item-meta :title="item.appName" :description="item.generationMessage || item.initPrompt">
               <template #avatar><a-avatar>{{ item.appName.slice(0, 1) }}</a-avatar></template>
             </a-list-item-meta>
-            <a-space>
+            <a-space wrap>
+              <a-tag color="blue">{{ codeGenTypeText(item.codeGenType) }}</a-tag>
+              <a-tag v-if="appTab === 'mine'" :color="visibilityColor(item.visibility)">
+                {{ visibilityText(item.visibility) }}
+              </a-tag>
               <a-tag :color="statusColor(item.generationStatus)">{{ statusText(item.generationStatus) }}</a-tag>
               <a-button type="link" @click="openApp(item.id)">进入工作区</a-button>
             </a-space>
@@ -100,7 +105,7 @@ import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import { createApp, listCollaboratedApps, listFeaturedApps, listMyApps } from '@/api/app'
 import defaultCover from '@/assets/default-app-cover.svg'
-import type { AppGenerationStatus, AppVO, CodeGenTypeSelection } from '@/api/types'
+import type { AppGenerationStatus, AppVisibility, AppVO, CodeGenType, CodeGenTypeSelection } from '@/api/types'
 import { useUserStore } from '@/stores/user'
 
 const router = useRouter()
@@ -268,6 +273,11 @@ const statusText = (status: AppGenerationStatus) => ({
 const statusColor = (status: AppGenerationStatus) => ({
   draft: 'default', generating: 'processing', ready: 'success', failed: 'error', cancelled: 'warning',
 }[status])
+const codeGenTypeText = (type: CodeGenType) => ({
+  html: 'HTML 模式', multi_file: '多文件模式', vue_project: 'Vue3 工程模式',
+}[type] || '网页应用模式')
+const visibilityText = (visibility: AppVisibility) => (visibility === 'public' ? '公开' : '私有')
+const visibilityColor = (visibility: AppVisibility) => (visibility === 'public' ? 'green' : 'default')
 
 onMounted(() => {
   // 两个区域相互独立；精选接口失败时仍然尝试加载我的应用。
