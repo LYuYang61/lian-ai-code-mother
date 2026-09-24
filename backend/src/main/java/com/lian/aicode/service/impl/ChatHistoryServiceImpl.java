@@ -3,6 +3,7 @@ package com.lian.aicode.service.impl;
 import com.lian.aicode.ai.AiCodeGeneratorService;
 import com.lian.aicode.ai.AiCodeGeneratorServiceFactory;
 import com.lian.aicode.ai.model.ConversationSummaryResult;
+import com.lian.aicode.core.stream.StreamMessageHistoryFormatter;
 import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.mapper.AppChatSummaryMapper;
@@ -296,7 +297,9 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
             if (ChatHistoryMessageTypeEnum.USER.getValue().equals(history.getMessageType())) {
                 messages.add(UserMessage.from(history.getMessage()));
             } else if (ChatHistoryMessageTypeEnum.AI.getValue().equals(history.getMessageType())) {
-                messages.add(AiMessage.from(history.getMessage()));
+                // 历史里的 [选择工具]/[工具调用] 段只是展示摘要；带进记忆会诱导模型用正文伪造工具记录。
+                messages.add(AiMessage.from(
+                        StreamMessageHistoryFormatter.stripToolTranscript(history.getMessage())));
             }
         }
         return messages;

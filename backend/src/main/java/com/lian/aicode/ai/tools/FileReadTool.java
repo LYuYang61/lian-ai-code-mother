@@ -22,6 +22,11 @@ public final class FileReadTool extends BaseProjectTool {
     @Tool("读取 Vue 工程中的一个源文件，只能使用工程根目录内的相对路径")
     public String readFile(@P("文件的相对路径") String relativeFilePath,
                            @ToolMemoryId Long ignoredAppId) {
+        if (context.isCancelled()) {
+            log.info("AI 文件读取跳过：actor={}, appId={}, version={}, result=任务已取消",
+                    actor(), context.getAppId(), context.getVersionNo());
+            return cancellationMessage();
+        }
         try {
             Path path = policy().resolveFile(relativeFilePath);
             if (!Files.isRegularFile(path)) {
@@ -32,10 +37,22 @@ public final class FileReadTool extends BaseProjectTool {
                         actor(), context.getAppId(), context.getVersionNo(), policy().relative(path));
                 return "文件过大，无法读取：" + policy().relative(path);
             }
+            String content = Files.readString(path, StandardCharsets.UTF_8);
+            if (context.isCancelled()) {
+                log.info("AI 文件读取中止：actor={}, appId={}, version={}, result=任务已取消",
+                        actor(), context.getAppId(), context.getVersionNo());
+                return cancellationMessage();
+            }
+            context.markFileRead(path);
             log.info("AI 文件读取：actor={}, appId={}, version={}, path={}, result=成功",
                     actor(), context.getAppId(), context.getVersionNo(), policy().relative(path));
-            return Files.readString(path, StandardCharsets.UTF_8);
+            return content;
         } catch (Exception exception) {
+            if (context.isCancelled()) {
+                log.info("AI 文件读取中止：actor={}, appId={}, version={}, result=任务已取消",
+                        actor(), context.getAppId(), context.getVersionNo());
+                return cancellationMessage();
+            }
             log.warn("AI 文件读取失败：actor={}, appId={}, version={}, path={}, reason={}",
                     actor(), context.getAppId(), context.getVersionNo(), relativeFilePath,
                     exception.getClass().getSimpleName());

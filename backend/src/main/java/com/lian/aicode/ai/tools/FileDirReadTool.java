@@ -28,12 +28,20 @@ public final class FileDirReadTool extends BaseProjectTool {
     @Tool("读取 Vue 工程目录结构；省略路径表示工程根目录")
     public String readDir(@P("目录的相对路径，可为空") String relativeDirPath,
                           @ToolMemoryId Long ignoredAppId) {
+        if (context.isCancelled()) {
+            log.info("AI 目录读取跳过：actor={}, appId={}, version={}, result=任务已取消",
+                    actor(), context.getAppId(), context.getVersionNo());
+            return cancellationMessage();
+        }
         try {
             Path root = policy().resolveDirectory(relativeDirPath);
             List<String> entries = new ArrayList<>(MAX_ENTRIES);
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes) {
+                    if (context.isCancelled()) {
+                        return FileVisitResult.TERMINATE;
+                    }
                     if (!directory.equals(root) && policy().isIgnoredPath(directory)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
@@ -49,6 +57,9 @@ public final class FileDirReadTool extends BaseProjectTool {
 
                 @Override
                 public FileVisitResult visitFile(Path path, BasicFileAttributes attributes) {
+                    if (context.isCancelled()) {
+                        return FileVisitResult.TERMINATE;
+                    }
                     if (!Files.isSymbolicLink(path)
                             && !policy().isIgnoredPath(path)
                             && entries.size() < MAX_ENTRIES) {
@@ -58,6 +69,11 @@ public final class FileDirReadTool extends BaseProjectTool {
                             ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
                 }
             });
+            if (context.isCancelled()) {
+                log.info("AI 目录读取中止：actor={}, appId={}, version={}, result=任务已取消",
+                        actor(), context.getAppId(), context.getVersionNo());
+                return cancellationMessage();
+            }
             entries.sort(Comparator.naturalOrder());
             StringBuilder result = new StringBuilder("工程目录结构：\n");
             entries.forEach(entry -> result.append(entry).append('\n'));
@@ -66,6 +82,11 @@ public final class FileDirReadTool extends BaseProjectTool {
                     relativeDirPath == null || relativeDirPath.isBlank() ? "." : relativeDirPath);
             return result.toString();
         } catch (IOException | RuntimeException exception) {
+            if (context.isCancelled()) {
+                log.info("AI 目录读取中止：actor={}, appId={}, version={}, result=任务已取消",
+                        actor(), context.getAppId(), context.getVersionNo());
+                return cancellationMessage();
+            }
             log.warn("AI 目录读取失败：actor={}, appId={}, version={}, path={}, reason={}",
                     actor(), context.getAppId(), context.getVersionNo(), relativeDirPath,
                     exception.getClass().getSimpleName());

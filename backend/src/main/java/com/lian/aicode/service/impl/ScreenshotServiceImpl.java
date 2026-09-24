@@ -145,11 +145,11 @@ public class ScreenshotServiceImpl implements ScreenshotService {
             if (app == null || !versionNo.equals(app.getCurrentVersion()) || !needsCover(app, versionNo)) {
                 return;
             }
-            // 截图浏览器没有用户 Session；私有应用只能在部署为公开地址后截图，不能绕过预览鉴权。
-            if (!isPubliclyReachable(app)) {
+            String reachableUrl = resolveReachableScreenshotUrl(app, versionNo, webUrl);
+            if (reachableUrl == null) {
                 return;
             }
-            submit(appId, versionNo, webUrl, trigger, actorAccount);
+            submit(appId, versionNo, reachableUrl, trigger, actorAccount);
         } catch (RuntimeException exception) {
             // 封面是部署后的可选补偿能力，不能把数据库短暂故障传播给已完成的主业务。
             log.warn("检查并提交封面截图任务失败：actor={}, appId={}, version={}, trigger={}, reason={}",
@@ -412,6 +412,29 @@ public class ScreenshotServiceImpl implements ScreenshotService {
     private boolean isPubliclyReachable(App app) {
         return AppVisibilityEnum.PUBLIC.getValue().equals(app.getVisibility())
                 || AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus());
+    }
+
+    /**
+     * 按应用状态解析截图浏览器真正可达的目标地址，返回 null 表示本轮放弃截图。
+     *
+     * <p>截图浏览器没有用户 Session：public 应用的 preview 地址可匿名访问，信任调用方 URL；
+     * private 应用的 preview 需要鉴权，只有部署目录已经切到目标版本（deployedVersion 等于
+     * versionNo）时才能改用公开部署地址。部署目录还停留在旧版本时，preview 会截到 401 错误页、
+     * 部署地址会截到旧版本页面，都只能跳过，等部署动作以 deploy 触发补上正确封面。
+     * 2026-09-24 实测：private+已部署应用生成新版后按 preview 地址截到 401 错误页并上传。</p>
+     */
+    private String resolveReachableScreenshotUrl(App app, Integer versionNo, String fallbackUrl) {
+        if (AppVisibilityEnum.PUBLIC.getValue().equals(app.getVisibility())) {
+            return fallbackUrl;
+        }
+        return isDeployedToVersion(app, versionNo) ? buildDeployUrl(app.getDeployKey()) : null;
+    }
+
+    /** private 应用只有部署目录已切到目标版本时，公开部署地址的页面内容才与该版本一致。 */
+    static boolean isDeployedToVersion(App app, Integer versionNo) {
+        return AppDeploymentStatusEnum.DEPLOYED.getValue().equals(app.getDeploymentStatus())
+                && StringUtils.hasText(app.getDeployKey())
+                && versionNo.equals(app.getDeployedVersion());
     }
 
     private String taskKey(Long appId, Integer versionNo) {

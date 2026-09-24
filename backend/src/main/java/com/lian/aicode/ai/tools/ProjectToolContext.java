@@ -1,8 +1,11 @@
 package com.lian.aicode.ai.tools;
 
+import lombok.AccessLevel;
 import lombok.Getter;
 
 import java.nio.file.Path;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -22,6 +25,9 @@ public final class ProjectToolContext {
     private final long maxTotalBytes;
     private final int maxFileSizeBytes;
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    /** 记录本轮已成功读取的真实文件，供 modifyFile 强制执行“先读后改”。 */
+    @Getter(AccessLevel.NONE)
+    private final Set<Path> readFiles = ConcurrentHashMap.newKeySet();
 
     public ProjectToolContext(Long appId, Integer versionNo, String actorAccount, Path projectRoot,
                               int maxFiles, long maxTotalBytes, int maxFileSizeBytes) {
@@ -43,5 +49,25 @@ public final class ProjectToolContext {
 
     public boolean isCancelled() {
         return cancelled.get();
+    }
+
+    public void markFileRead(Path path) {
+        if (path != null) {
+            readFiles.add(normalize(path));
+        }
+    }
+
+    public boolean hasReadFile(Path path) {
+        return path != null && readFiles.contains(normalize(path));
+    }
+
+    public void invalidateFileRead(Path path) {
+        if (path != null) {
+            readFiles.remove(normalize(path));
+        }
+    }
+
+    private Path normalize(Path path) {
+        return path.toAbsolutePath().normalize();
     }
 }

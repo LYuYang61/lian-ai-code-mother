@@ -8,6 +8,8 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public abstract class BaseProjectTool {
 
+    protected static final String CANCELLATION_MESSAGE = "生成任务已被用户取消，请停止调用文件工具";
+
     protected final ProjectToolContext context;
     private final String toolName;
     private final String displayName;
@@ -18,5 +20,9 @@ public abstract class BaseProjectTool {
 
     protected String actor() {
         return context.getActorAccount();
+    }
+
+    protected String cancellationMessage() {
+        return CANCELLATION_MESSAGE;
     }
 }

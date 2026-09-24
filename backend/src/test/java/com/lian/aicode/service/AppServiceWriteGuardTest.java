@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Vue 零写入守卫的事件判据测试：只有适配器构造的 tool_executed 事件（成功写入/修改）
+ * Vue 零变更守卫的事件判据测试：只有适配器构造的 tool_executed 事件（成功写入/修改/删除）
  * 才计入真实文件写入；模型正文伪造的工具记录、失败的工具调用一律不计入。
  */
 class AppServiceWriteGuardTest {
@@ -21,6 +21,8 @@ class AppServiceWriteGuardTest {
                 "{\"type\":\"tool_executed\",\"name\":\"writeFile\",\"result\":\"文件写入成功：src/App.vue\"}"));
         assertTrue(AppServiceImpl.isSuccessfulFileWriteEvent(objectMapper,
                 "{\"type\":\"tool_executed\",\"name\":\"modifyFile\",\"result\":\"文件修改成功：src/style.css\"}"));
+        assertTrue(AppServiceImpl.isSuccessfulFileMutationEvent(objectMapper,
+                "{\"type\":\"tool_executed\",\"name\":\"deleteFile\",\"result\":\"文件删除成功：src/OldPage.vue\"}"));
     }
 
     @Test
@@ -31,6 +33,8 @@ class AppServiceWriteGuardTest {
                 "{\"type\":\"tool_executed\",\"name\":\"readFile\",\"result\":\"文件读取完成，内容未展示\"}"));
         assertFalse(AppServiceImpl.isSuccessfulFileWriteEvent(objectMapper,
                 "{\"type\":\"tool_executed\",\"name\":\"exit\",\"result\":\"文件操作已完成\"}"));
+        assertFalse(AppServiceImpl.isSuccessfulFileMutationEvent(objectMapper,
+                "{\"type\":\"tool_executed\",\"name\":\"deleteFile\",\"result\":\"文件删除失败，请检查路径\"}"));
     }
 
     @Test

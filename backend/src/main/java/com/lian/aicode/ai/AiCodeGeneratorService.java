@@ -54,4 +54,11 @@ public interface AiCodeGeneratorService {
      */
     @SystemMessage(fromResource = "prompt/codegen-vue-project-system-prompt.txt")
     TokenStream generateVueProjectCodeStream(@MemoryId Long appId, @UserMessage String userMessage);
+
+    /**
+     * Vue 工程增量修改专用流。
+     * 创建和修改使用不同系统提示词，避免模型在已有工程上重复“从零创建”或无理由重写文件。
+     */
+    @SystemMessage(fromResource = "prompt/codegen-vue-project-modify-system-prompt.txt")
+    TokenStream modifyVueProjectCodeStream(@MemoryId Long appId, @UserMessage String userMessage);
 }

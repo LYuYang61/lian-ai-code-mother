@@ -9,6 +9,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 验证用户取消后文件工具会明确通知模型停止，而不是伪装成普通文件错误。 */
 class ProjectToolCancellationTest {
@@ -39,6 +40,24 @@ class ProjectToolCancellationTest {
 
         assertEquals("生成任务已被用户取消，请停止调用文件工具", result);
         assertEquals("old", Files.readString(file, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void readDeleteDirectoryAndExitToolsStopAfterCancellation() throws Exception {
+        Path file = tempDir.resolve("src/App.vue");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "content", StandardCharsets.UTF_8);
+        ProjectToolContext context = cancelledContext();
+
+        assertEquals("生成任务已被用户取消，请停止调用文件工具",
+                new FileReadTool(context).readFile("src/App.vue", 1L));
+        assertEquals("生成任务已被用户取消，请停止调用文件工具",
+                new FileDirReadTool(context).readDir("", 1L));
+        assertEquals("生成任务已被用户取消，请停止调用文件工具",
+                new FileDeleteTool(context).deleteFile("src/App.vue", 1L));
+        assertEquals("生成任务已被用户取消，请停止调用文件工具",
+                new ExitTool(context).exit());
+        assertTrue(Files.exists(file));
     }
 
     private ProjectToolContext cancelledContext() {

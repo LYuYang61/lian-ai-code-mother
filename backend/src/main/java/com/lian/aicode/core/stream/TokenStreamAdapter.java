@@ -58,7 +58,7 @@ public class TokenStreamAdapter {
                         .onError(error -> {
                             log.warn("AI TokenStream 失败：actor={}, appId={}, version={}, reason={}",
                                     context.getActorAccount(), context.getAppId(), context.getVersionNo(),
-                                    error == null ? "未知异常" : error.getClass().getSimpleName());
+                                    describe(error));
                             if (!sink.isCancelled()) {
                                 sink.error(error == null ? new IllegalStateException("AI 流异常") : error);
                             }
@@ -67,10 +67,19 @@ public class TokenStreamAdapter {
             } catch (RuntimeException exception) {
                 log.warn("启动 AI TokenStream 失败：actor={}, appId={}, version={}, reason={}",
                         context.getActorAccount(), context.getAppId(), context.getVersionNo(),
-                        exception.getClass().getSimpleName());
+                        describe(exception));
                 sink.error(exception);
             }
         }, FluxSink.OverflowStrategy.BUFFER);
+    }
+
+    /** 类名不足以定位问题：轮次上限、鉴权失败、网络中断都需要 message 才能区分。 */
+    private static String describe(Throwable error) {
+        if (error == null) {
+            return "未知异常";
+        }
+        String detail = error.getMessage() == null ? "" : ": " + error.getMessage();
+        return error.getClass().getSimpleName() + detail.substring(0, Math.min(detail.length(), 200));
     }
 
     private StreamMessage thinkingMessage(PartialThinking thinking) {

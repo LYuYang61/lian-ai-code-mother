@@ -125,7 +125,8 @@ public class AiCodeGeneratorServiceFactory {
                         request, "不存在名为 " + request.name() + " 的工具，请改用已声明的文件工具"))
                 // 2026-09-23 实测：关闭思考后模型会认真执行多轮写文件并反复复读校验，
                 // 电商管理后台类需求 20 轮（12 次写入 + 多轮校验读）恰好耗尽上限导致生成失败；放宽到 40。
-                .maxSequentialToolsInvocations(40)
+                // LangChain4j 1.20 已提供该新命名 API，避免继续使用已弃用的旧方法。
+                .maxToolCallingRoundTrips(40)
                 .inputGuardrails(new PromptSafetyInputGuardrail())
                 .build();
         log.info("创建 Vue 工程 AI Service：appId={}, excludedMessageId={}, toolCount={}",

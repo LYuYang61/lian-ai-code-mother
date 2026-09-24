@@ -41,4 +41,30 @@ public class StreamMessageHistoryFormatter {
         }
         return chunk;
     }
+
+    /**
+     * 剥离历史文本中的工具调用标记行，只保留模型叙述和工具结果摘要。
+     *
+     * <p>工具事件按 {@link #toHistoryText} 的格式生成独立的标记行（[选择工具] / [工具调用] 开头），
+     * 其后紧跟结果行。展示层需要完整记录，但恢复进 ChatMemory 的历史如果带着这些标记行，
+     * 会对模型形成强示范，诱导它在正文里伪造同样格式的工具记录而不发起真实调用
+     * （2026-09-24 实测复现，被零变更守卫拦截）。因此按行移除两个标记行本身；
+     * 不带标记的结果摘要（如"文件修改成功：src/App.vue"）与模型叙述保留。
+     * 若剥离后没有剩余内容，返回占位说明，保持消息仍然存在。</p>
+     */
+    public static String stripToolTranscript(String historyText) {
+        if (historyText == null || historyText.isBlank()) {
+            return historyText == null ? "" : historyText;
+        }
+        StringBuilder kept = new StringBuilder();
+        for (String line : historyText.split("\n", -1)) {
+            String trimmed = line.strip();
+            if (trimmed.startsWith("[选择工具]") || trimmed.startsWith("[工具调用]")) {
+                continue;
+            }
+            kept.append(line).append('\n');
+        }
+        String result = kept.toString().stripTrailing();
+        return result.isBlank() ? "（本轮工具操作过程已省略，以对话双方文字内容为准）" : result;
+    }
 }

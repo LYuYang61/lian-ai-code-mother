@@ -152,15 +152,31 @@ public class AiCodeGeneratorFacade {
                                                    Long excludedMessageId,
                                                    Integer versionNo,
                                                    String actorAccount) {
+        return generateAndSaveCodeStream(appId, userMessage, codeGenType, outputDirectory,
+                excludedMessageId, versionNo, actorAccount, false);
+    }
+
+    /**
+     * 带创建/迭代语义的流式生成入口。Vue 工程会据此选择创建提示词或增量修改提示词；
+     * HTML 和多文件模式仍由各自的全量结果解析器负责保存。
+     */
+    public Flux<String> generateAndSaveCodeStream(Long appId,
+                                                   String userMessage,
+                                                   CodeGenTypeEnum codeGenType,
+                                                   Path outputDirectory,
+                                                   Long excludedMessageId,
+                                                   Integer versionNo,
+                                                   String actorAccount,
+                                                   boolean modification) {
         validateRequest(userMessage, codeGenType);
         return Flux.defer(() -> {
             long startedAt = System.nanoTime();
-            log.info("AI 调用开始：appId={}, version={}, type={}, actor={}",
-                    appId, versionNo, codeGenType.getValue(), actorAccount);
+            log.info("AI 调用开始：appId={}, version={}, type={}, mode={}, actor={}",
+                    appId, versionNo, codeGenType.getValue(), modification ? "修改" : "创建", actorAccount);
             try {
                 if (codeGenType == CodeGenTypeEnum.VUE_PROJECT) {
                     return generateVueProjectStream(appId, userMessage, outputDirectory, excludedMessageId,
-                            versionNo, actorAccount, startedAt);
+                            versionNo, actorAccount, modification, startedAt);
                 }
                 AiCodeGeneratorService service = getService(appId, excludedMessageId);
                 Flux<String> codeStream = switch (codeGenType) {
@@ -184,7 +200,7 @@ public class AiCodeGeneratorFacade {
 
     private Flux<String> generateVueProjectStream(Long appId, String userMessage, Path outputDirectory,
                                                    Long excludedMessageId, Integer versionNo,
-                                                   String actorAccount, long startedAt) {
+                                                   String actorAccount, boolean modification, long startedAt) {
         if (appId == null || outputDirectory == null) {
             return Flux.error(new BusinessException(ErrorCode.PARAMS_ERROR, "Vue 工程生成缺少应用版本目录"));
         }
@@ -208,7 +224,9 @@ public class AiCodeGeneratorFacade {
         AiCodeGeneratorService service = factory.getForVueProject(appId, excludedMessageId, toolBundle);
         dev.langchain4j.service.TokenStream tokenStream;
         try {
-            tokenStream = service.generateVueProjectCodeStream(appId, userMessage);
+            tokenStream = modification
+                    ? service.modifyVueProjectCodeStream(appId, userMessage)
+                    : service.generateVueProjectCodeStream(appId, userMessage);
         } catch (dev.langchain4j.guardrail.InputGuardrailException exception) {
             // 护轨文案本身面向用户；包装后 SSE 和对话历史能呈现真实拦截原因，而不是通用的模型故障提示。
             throw new BusinessException(ErrorCode.OPERATION_ERROR, guardrailUserMessage(exception), exception);
@@ -217,8 +235,9 @@ public class AiCodeGeneratorFacade {
             return Flux.error(new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 未返回 Vue 工具流"));
         }
         return tokenStreamAdapter.adapt(tokenStream, toolBundle, context)
-                .doFinally(signal -> log.info("AI 调用结束：actor={}, appId={}, version={}, type={}, signal={}, durationMs={}",
-                        actorAccount, appId, actualVersionNo, CodeGenTypeEnum.VUE_PROJECT.getValue(), signal,
+                .doFinally(signal -> log.info("AI 调用结束：actor={}, appId={}, version={}, type={}, mode={}, signal={}, durationMs={}",
+                        actorAccount, appId, actualVersionNo, CodeGenTypeEnum.VUE_PROJECT.getValue(),
+                        modification ? "修改" : "创建", signal,
                         elapsedMillis(startedAt)));
     }
 

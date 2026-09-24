@@ -13,6 +13,11 @@ public final class ExitTool extends BaseProjectTool {
 
     @Tool("当工程文件已经生成或修改完成时调用，停止继续调用文件工具")
     public String exit() {
+        if (context.isCancelled()) {
+            log.info("AI 工具调用结束：actor={}, appId={}, version={}, result=任务已取消",
+                    actor(), context.getAppId(), context.getVersionNo());
+            return cancellationMessage();
+        }
         log.info("AI 工具调用结束：actor={}, appId={}, version={}, result=模型请求结束",
                 actor(), context.getAppId(), context.getVersionNo());
         return "文件操作已完成，请输出简短的完成说明";

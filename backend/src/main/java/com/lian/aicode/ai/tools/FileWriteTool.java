@@ -26,7 +26,7 @@ public final class FileWriteTool extends BaseProjectTool {
         if (context.isCancelled()) {
             log.info("AI 文件写入跳过：actor={}, appId={}, version={}, result=任务已取消",
                     actor(), context.getAppId(), context.getVersionNo());
-            return "生成任务已被用户取消，请停止调用文件工具";
+            return cancellationMessage();
         }
         Path target = null;
         try {
@@ -38,12 +38,19 @@ public final class FileWriteTool extends BaseProjectTool {
             try {
                 Files.writeString(temporary, content, StandardCharsets.UTF_8,
                         StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+                if (context.isCancelled()) {
+                    log.info("AI 文件写入中止：actor={}, appId={}, version={}, result=任务已取消",
+                            actor(), context.getAppId(), context.getVersionNo());
+                    return cancellationMessage();
+                }
                 try {
                     Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING,
                             StandardCopyOption.ATOMIC_MOVE);
                 } catch (java.nio.file.AtomicMoveNotSupportedException exception) {
                     Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
                 }
+                // 写入内容由模型本轮提供，写完即视为已读，可立即继续 modifyFile 精修。
+                context.markFileRead(target);
             } finally {
                 Files.deleteIfExists(temporary);
             }
@@ -56,7 +63,7 @@ public final class FileWriteTool extends BaseProjectTool {
             if (context.isCancelled()) {
                 log.info("AI 文件写入中止：actor={}, appId={}, version={}, result=任务已取消",
                         actor(), context.getAppId(), context.getVersionNo());
-                return "生成任务已被用户取消，请停止调用文件工具";
+                return cancellationMessage();
             }
             String path = target == null ? safePath(relativeFilePath) : policy().relative(target);
             log.warn("AI 文件写入失败：actor={}, appId={}, version={}, path={}, reason={}",

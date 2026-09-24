@@ -380,10 +380,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         if (codeGenType == null) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "应用代码生成类型无效");
         }
+        boolean modification = app.getCurrentVersion() != null && app.getCurrentVersion() > 0;
 
         long startedAt = System.nanoTime();
-        log.info("应用生成任务开始：actor={}, appId={}, type={}, promptLength={}",
-                loginUser.getUserAccount(), appId, codeGenType.getValue(), prompt.length());
+        log.info("应用生成任务开始：actor={}, appId={}, type={}, mode={}, promptLength={}",
+                loginUser.getUserAccount(), appId, codeGenType.getValue(),
+                modification ? "修改" : "创建", prompt.length());
 
         GenerationTaskManager.GenerationTask task;
         try {
@@ -422,12 +424,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         StringBuilder aiMessage = new StringBuilder();
         AtomicBoolean sourceCompleted = new AtomicBoolean(false);
         AtomicBoolean stateMarked = new AtomicBoolean(false);
-        // 只统计真实成功的 writeFile/modifyFile 工具事件；模型可以把工具记录写成文本，但伪造不出事件信封。
-        AtomicInteger realFileWrites = new AtomicInteger();
+        // 只统计真实成功的文件变更工具事件；模型可以把工具记录写成文本，但伪造不出事件信封。
+        AtomicInteger realFileMutations = new AtomicInteger();
         Flux<String> source = aiCodeGeneratorFacade.generateAndSaveCodeStream(
-                        appId, prompt, codeGenType,
+                appId, prompt, codeGenType,
                         versionDirectory, userHistory.getId(),
-                        version.getVersionNo(), loginUser.getUserAccount())
+                        version.getVersionNo(), loginUser.getUserAccount(), modification)
                 .doOnNext(chunk -> {
                     String historyChunk = streamMessageHistoryFormatter.toHistoryText(chunk);
                     if (!historyChunk.isBlank() && aiMessage.length() < MAX_CHAT_HISTORY_MESSAGE_LENGTH) {
@@ -435,8 +437,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                         aiMessage.append(historyChunk, 0, Math.min(historyChunk.length(), remaining));
                     }
                     if (codeGenType == CodeGenTypeEnum.VUE_PROJECT
-                            && isSuccessfulFileWriteEvent(objectMapper, chunk)) {
-                        realFileWrites.incrementAndGet();
+                            && isSuccessfulFileMutationEvent(objectMapper, chunk)) {
+                        realFileMutations.incrementAndGet();
                     }
                 })
                 // 门面只有在解析和保存成功后才完成，因此这里是“可用版本”的唯一完成信号。
@@ -449,8 +451,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                         try {
                             // 上游已经完整结束时，停止请求只能算“来晚了”，不能把可用版本改成取消态。
                             if (sourceCompleted.get()) {
-                                if (codeGenType == CodeGenTypeEnum.VUE_PROJECT && realFileWrites.get() == 0) {
-                                    // 2026-09-23 实测：模型可能"读而不写"后正常收尾，产出纯模板的假成功版本。
+                                if (codeGenType == CodeGenTypeEnum.VUE_PROJECT && realFileMutations.get() == 0) {
+                                    // 2026-09-23 实测：模型可能"读而不改"后正常收尾，产出纯模板的假成功版本。
                                     // 拒收并按失败收口；异常会经下方 catch 记录原因并向前端透出。
                                     throw new BusinessException(ErrorCode.OPERATION_ERROR,
                                             "模型未写入任何工程文件，本版本已作废，请重试或简化需求描述");
@@ -493,24 +495,33 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     }
 
     /**
-     * 判定一条流式事件是否为真实成功的文件写入/修改。
+     * 判定一条流式事件是否为真实成功的文件变更。
      *
      * <p>type/name/result 三重判据只有 TokenStreamAdapter 能构造；模型在正文里伪造的
      * “工具记录”会以 ai_response 事件到达，type 对不上，无法计入。</p>
      */
-    public static boolean isSuccessfulFileWriteEvent(ObjectMapper mapper, String chunk) {
+    public static boolean isSuccessfulFileMutationEvent(ObjectMapper mapper, String chunk) {
         if (chunk == null || !chunk.contains("tool_executed")) {
             return false;
         }
         try {
             var node = mapper.readTree(chunk);
             String result = node.path("result").asText("");
+            String name = node.path("name").asText();
+            boolean mutationTool = "writeFile".equals(name) || "modifyFile".equals(name)
+                    || "deleteFile".equals(name);
+            boolean success = result.startsWith("文件写入成功") || result.startsWith("文件修改成功")
+                    || result.startsWith("文件删除成功");
             return StreamMessageTypeEnum.TOOL_EXECUTED.getValue().equals(node.path("type").asText())
-                    && ("writeFile".equals(node.path("name").asText()) || "modifyFile".equals(node.path("name").asText()))
-                    && (result.startsWith("文件写入成功") || result.startsWith("文件修改成功"));
+                    && mutationTool && success;
         } catch (IOException exception) {
             return false;
         }
+    }
+
+    /** 保留旧测试和调用方的语义别名，实际判据已覆盖删除文件这种合法变更。 */
+    public static boolean isSuccessfulFileWriteEvent(ObjectMapper mapper, String chunk) {
+        return isSuccessfulFileMutationEvent(mapper, chunk);
     }
 
     /**
