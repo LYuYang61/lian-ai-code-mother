@@ -31,22 +31,34 @@ public class OssManager {
 
     /** 上传 JPEG 封面并返回公开访问地址；密钥和完整 SDK 响应不会进入日志。 */
     public String upload(String key, Path file) {
+        return upload(key, file, "image/jpeg");
+    }
+
+    /**
+     * 上传受控类型的对象并返回公开访问地址。
+     *
+     * <p>工作流生成的 Mermaid 图使用 SVG，Logo 使用 PNG；统一从这里进入 OSS，
+     * 避免各工具自行拼接对象路径或泄露临时第三方地址。</p>
+     */
+    public String upload(String key, Path file, String contentType) {
         OSSClient client = requireClient();
         String safeKey = normalizeKey(key);
         if (file == null || !Files.isRegularFile(file)) {
             throw new IllegalArgumentException("OSS 上传文件不存在");
         }
+        String safeContentType = normalizeContentType(contentType);
         try (var inputStream = Files.newInputStream(file)) {
             client.putObject(PutObjectRequest.newBuilder()
                     .bucket(properties.getBucket())
                     .key(safeKey)
-                    .contentType("image/jpeg")
+                    .contentType(safeContentType)
                     .body(BinaryData.fromStream(inputStream, Files.size(file)))
                     .build());
         } catch (IOException exception) {
             throw new IllegalStateException("读取待上传的 OSS 封面文件失败", exception);
         }
-        log.info("阿里云 OSS 封面上传完成：objectKey={}, result=成功", safeKey);
+        log.info("阿里云 OSS 对象上传完成：objectKey={}, contentType={}, result=成功",
+                safeKey, safeContentType);
         return normalizePublicBaseUrl(properties.getPublicBaseUrl()) + "/" + safeKey;
     }
 
@@ -103,5 +115,14 @@ public class OssManager {
             throw new IllegalStateException("OSS_PUBLIC_BASE_URL 未配置");
         }
         return baseUrl.trim().replaceAll("/+$", "");
+    }
+
+    private String normalizeContentType(String contentType) {
+        String value = StringUtils.hasText(contentType) ? contentType.trim().toLowerCase() : "";
+        if (!java.util.Set.of("image/jpeg", "image/png", "image/svg+xml", "image/webp")
+                .contains(value)) {
+            throw new IllegalArgumentException("OSS 内容类型不在图片白名单内");
+        }
+        return value;
     }
 }

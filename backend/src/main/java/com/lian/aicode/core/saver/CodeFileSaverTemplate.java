@@ -9,8 +9,10 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.UUID;
 
 /**
  * 代码文件保存模板，定义校验、建目录、写文件和失败清理的统一流程。
@@ -61,10 +63,7 @@ public abstract class CodeFileSaverTemplate<T> {
      */
     public final File saveCode(T result, Path targetDirectory) {
         validateInput(result);
-        Path normalizedTarget = targetDirectory.toAbsolutePath().normalize();
-        if (!normalizedTarget.startsWith(outputRoot)) {
-            throw new BusinessException(ErrorCode.OPERATION_ERROR, "代码输出目录超出允许范围");
-        }
+        Path normalizedTarget = normalizeTargetDirectory(targetDirectory);
         Path outputDirectory = null;
         try {
             Files.createDirectories(outputRoot);
@@ -79,6 +78,89 @@ public abstract class CodeFileSaverTemplate<T> {
         } catch (RuntimeException exception) {
             cleanupPartialDirectory(outputDirectory);
             throw exception;
+        }
+    }
+
+    /**
+     * 将新结果安全替换到已有版本目录。
+     *
+     * <p>工作流的质量检查失败后可能回到代码生成节点。HTML 和多文件模式使用结构化
+     * 保存器，第二轮生成不能再次直接 createDirectory；先在同一父目录写临时目录，
+     * 再切换目录；发生异常时尽量恢复旧目录，避免质检重试留下半套文件或覆盖到版本根目录。</p>
+     */
+    public final File replaceCode(T result, Path targetDirectory) {
+        validateInput(result);
+        Path normalizedTarget = normalizeTargetDirectory(targetDirectory);
+        Path parent = normalizedTarget.getParent();
+        Path temporaryDirectory = null;
+        Path backupDirectory = null;
+        boolean oldDirectoryMoved = false;
+        boolean newDirectoryMoved = false;
+        try {
+            Files.createDirectories(parent);
+            validateExistingTarget(normalizedTarget);
+            temporaryDirectory = Files.createTempDirectory(parent,
+                    "." + getCodeType().getValue().toLowerCase() + "-replace-");
+            saveFiles(result, temporaryDirectory);
+
+            if (Files.exists(normalizedTarget, LinkOption.NOFOLLOW_LINKS)) {
+                backupDirectory = parent.resolve("." + normalizedTarget.getFileName()
+                        + "-backup-" + UUID.randomUUID());
+                Files.move(normalizedTarget, backupDirectory);
+                oldDirectoryMoved = true;
+            }
+            Files.move(temporaryDirectory, normalizedTarget);
+            newDirectoryMoved = true;
+            temporaryDirectory = null;
+
+            if (backupDirectory != null) {
+                cleanupPartialDirectory(backupDirectory);
+                backupDirectory = null;
+            }
+            return normalizedTarget.toFile();
+        } catch (IOException exception) {
+            restoreReplacement(normalizedTarget, backupDirectory, oldDirectoryMoved, newDirectoryMoved);
+            cleanupPartialDirectory(temporaryDirectory);
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "代码文件替换失败", exception);
+        } catch (RuntimeException exception) {
+            restoreReplacement(normalizedTarget, backupDirectory, oldDirectoryMoved, newDirectoryMoved);
+            cleanupPartialDirectory(temporaryDirectory);
+            throw exception;
+        }
+    }
+
+    private Path normalizeTargetDirectory(Path targetDirectory) {
+        if (targetDirectory == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "代码输出目录不能为空");
+        }
+        Path normalizedTarget = targetDirectory.toAbsolutePath().normalize();
+        if (!normalizedTarget.startsWith(outputRoot) || normalizedTarget.equals(outputRoot)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "代码输出目录超出允许范围");
+        }
+        return normalizedTarget;
+    }
+
+    private void validateExistingTarget(Path targetDirectory) {
+        if (Files.isSymbolicLink(targetDirectory)
+                || (Files.exists(targetDirectory, LinkOption.NOFOLLOW_LINKS)
+                && !Files.isDirectory(targetDirectory, LinkOption.NOFOLLOW_LINKS))) {
+            throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "代码输出目录不能是符号链接或普通文件");
+        }
+    }
+
+    private void restoreReplacement(Path targetDirectory, Path backupDirectory,
+                                    boolean oldDirectoryMoved, boolean newDirectoryMoved) {
+        if (newDirectoryMoved) {
+            cleanupPartialDirectory(targetDirectory);
+        }
+        if (oldDirectoryMoved && backupDirectory != null
+                && !Files.exists(targetDirectory, LinkOption.NOFOLLOW_LINKS)
+                && Files.exists(backupDirectory, LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                Files.move(backupDirectory, targetDirectory);
+            } catch (IOException ignored) {
+                // 原始异常优先返回；备份目录仍留在受控根目录内，便于后续人工清理。
+            }
         }
     }
 

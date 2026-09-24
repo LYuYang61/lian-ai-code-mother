@@ -69,10 +69,12 @@ public class AppController {
     @GetMapping(value = "/chat/gen/code", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> chatToGenCode(@RequestParam Long appId,
                                                        @RequestParam String message,
+                                                       @RequestParam(defaultValue = "false") boolean agent,
                                                        HttpServletRequest request) {
         UserAccount loginUser = userService.getLoginUser(request);
-        log.info("开始应用代码生成接口：actor={}, appId={}", loginUser.getUserAccount(), appId);
-        Flux<String> contentFlux = appService.chatToGenCode(appId, message, loginUser);
+        log.info("开始应用代码生成接口：actor={}, appId={}, pipeline={}", loginUser.getUserAccount(), appId,
+                agent ? "workflow" : "direct");
+        Flux<String> contentFlux = appService.chatToGenCode(appId, message, loginUser, agent);
         return contentFlux
                 .map(this::chunkEvent)
                 // done 只在门面完成“解析 + 保存 + 状态更新”后发送。
@@ -317,7 +319,8 @@ public class AppController {
             var node = objectMapper.readTree(chunk);
             String type = node == null ? null : node.path("type").asText(null);
             return node != null && node.isObject() && type != null
-                    && Set.of("ai_response", "thinking", "tool_request", "tool_executed")
+                    && Set.of("ai_response", "thinking", "tool_request", "tool_executed",
+                    "workflow_start", "workflow_step", "workflow_quality", "workflow_completed", "workflow_error")
                     .contains(type.toLowerCase(Locale.ROOT));
         } catch (JsonProcessingException ignored) {
             return false;

@@ -36,6 +36,12 @@ public class StreamMessageHistoryFormatter {
                 String result = node.path("result").asText("");
                 return "\n\n[工具调用] " + displayName + " " + arguments + "\n" + result + "\n";
             }
+            if (type.startsWith("workflow_")) {
+                String message = node.path("message").asText("");
+                String step = node.path("step").asText("");
+                return message.isBlank() ? "" : "\n[工作流] " + message
+                        + (step.isBlank() ? "" : "：" + step) + "\n";
+            }
         } catch (Exception ignored) {
             // 兼容 HTML/MULTI 文本流和未来的非 JSON 文本事件。
         }

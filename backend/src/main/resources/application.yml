@@ -93,6 +93,32 @@ app:
       service-cache-max-size: ${AI_SERVICE_CACHE_MAX_SIZE:1000}
       service-cache-expire-after-write: ${AI_SERVICE_CACHE_EXPIRE_AFTER_WRITE:30m}
       service-cache-expire-after-access: ${AI_SERVICE_CACHE_EXPIRE_AFTER_ACCESS:10m}
+  ai-workflow:
+    # 第九期 AI 工作流默认可用，但只有请求显式带 agent=true 才会执行，不改变旧链路行为。
+    enabled: ${AI_WORKFLOW_ENABLED:true}
+    max-quality-retries: ${AI_WORKFLOW_MAX_QUALITY_RETRIES:2}
+    quality-check-enabled: ${AI_WORKFLOW_QUALITY_CHECK_ENABLED:true}
+    quality-fail-open: ${AI_WORKFLOW_QUALITY_FAIL_OPEN:true}
+    quality-hard-fail: ${AI_WORKFLOW_QUALITY_HARD_FAIL:false}
+    quality-max-code-chars: ${AI_WORKFLOW_QUALITY_MAX_CODE_CHARS:120000}
+    quality-max-files: ${AI_WORKFLOW_QUALITY_MAX_FILES:80}
+    # 工作流自产生的 Mermaid/Logo 对象统一写入这个 OSS 对象前缀下，不写入本地代码目录。
+    storage-prefix: ${AI_WORKFLOW_STORAGE_PREFIX:workflow}
+    image-collection:
+      enabled: ${AI_WORKFLOW_IMAGE_COLLECTION_ENABLED:true}
+      max-plan-tasks: ${AI_WORKFLOW_IMAGE_MAX_PLAN_TASKS:6}
+      max-images: ${AI_WORKFLOW_IMAGE_MAX_IMAGES:24}
+      parallelism: ${AI_WORKFLOW_IMAGE_PARALLELISM:4}
+      timeout: ${AI_WORKFLOW_IMAGE_TIMEOUT:45s}
+    mermaid:
+      # Windows 可设置为 mmdc.cmd；Linux/WSL 可设置为 mmdc。参数由程序以参数列表传入，避免命令注入。
+      command: ${MERMAID_CLI_COMMAND:mmdc}
+      timeout: ${AI_WORKFLOW_MERMAID_TIMEOUT:30s}
+      max-source-chars: ${AI_WORKFLOW_MERMAID_MAX_SOURCE_CHARS:20000}
+    dashscope:
+      enabled: ${AI_WORKFLOW_DASHSCOPE_ENABLED:true}
+      model: ${DASHSCOPE_IMAGE_MODEL:wan2.2-t2i-flash}
+      timeout: ${AI_WORKFLOW_DASHSCOPE_TIMEOUT:90s}
   collaboration:
     max-members: ${APP_COLLABORATION_MAX_MEMBERS:20}
   chat-history:

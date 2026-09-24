@@ -41,7 +41,13 @@ public interface AppService {
 
     boolean deleteApp(Long appId, UserAccount loginUser);
 
-    Flux<String> chatToGenCode(Long appId, String message, UserAccount loginUser);
+    /** 保留旧调用语义；默认使用稳定的非工作流链路。 */
+    default Flux<String> chatToGenCode(Long appId, String message, UserAccount loginUser) {
+        return chatToGenCode(appId, message, loginUser, false);
+    }
+
+    /** 是否经过第九期 LangGraph4j AI 工作流。 */
+    Flux<String> chatToGenCode(Long appId, String message, UserAccount loginUser, boolean agent);
 
     boolean stopGeneration(Long appId, UserAccount loginUser);
 

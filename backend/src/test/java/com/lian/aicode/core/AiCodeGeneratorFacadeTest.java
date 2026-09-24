@@ -68,6 +68,28 @@ class AiCodeGeneratorFacadeTest {
     }
 
     @Test
+    void qualityRetryReplacesStructuredVersionDirectory() throws Exception {
+        AiCodeGeneratorService service = mock(AiCodeGeneratorService.class);
+        when(service.generateHtmlCodeStream("第一轮"))
+                .thenReturn(Flux.just("```html\n<html>old</html>\n```"));
+        when(service.generateHtmlCodeStream("第二轮"))
+                .thenReturn(Flux.just("```html\n<html>new</html>\n```"));
+
+        AiCodeGeneratorFacade facade = newFacade(service);
+        Path target = tempDir.resolve("app/1/v1");
+        facade.generateAndSaveCodeStream(1L, "第一轮", CodeGenTypeEnum.HTML, target,
+                        null, 1, "tester", false)
+                .collectList()
+                .block();
+        facade.generateAndSaveCodeStream(1L, "第二轮", CodeGenTypeEnum.HTML, target,
+                        null, 1, "tester", true)
+                .collectList()
+                .block();
+
+        assertEquals("<html>new</html>", Files.readString(target.resolve("index.html")));
+    }
+
+    @Test
     void rejectsBlankUserMessageBeforeCallingModel() {
         AiCodeGeneratorService service = mock(AiCodeGeneratorService.class);
         AiCodeGeneratorFacade facade = newFacade(service);

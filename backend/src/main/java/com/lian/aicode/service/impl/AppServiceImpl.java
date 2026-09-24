@@ -45,6 +45,8 @@ import com.lian.aicode.service.GenerationCancelledException;
 import com.lian.aicode.service.GenerationTaskManager;
 import com.lian.aicode.service.ScreenshotService;
 import com.lian.aicode.service.UserService;
+import com.lian.aicode.workflow.CodeGenWorkflow;
+import com.lian.aicode.workflow.model.WorkflowRequest;
 import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.spring.service.impl.ServiceImpl;
@@ -113,6 +115,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     private final StreamMessageHistoryFormatter streamMessageHistoryFormatter;
     private final VueProjectBuilder vueProjectBuilder;
     private final ScreenshotService screenshotService;
+    private final CodeGenWorkflow codeGenWorkflow;
 
     @Value("${app.storage.max-prompt-length:10000}")
     private int maxPromptLength;
@@ -364,7 +367,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     }
 
     @Override
-    public Flux<String> chatToGenCode(Long appId, String message, UserAccount loginUser) {
+    public Flux<String> chatToGenCode(Long appId, String message, UserAccount loginUser, boolean agent) {
         requireLogin(loginUser);
         App app = requireApp(appId);
         if (!collaboratorService.canEdit(app, loginUser)) {
@@ -383,9 +386,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         boolean modification = app.getCurrentVersion() != null && app.getCurrentVersion() > 0;
 
         long startedAt = System.nanoTime();
-        log.info("应用生成任务开始：actor={}, appId={}, type={}, mode={}, promptLength={}",
+        log.info("应用生成任务开始：actor={}, appId={}, type={}, mode={}, pipeline={}, promptLength={}",
                 loginUser.getUserAccount(), appId, codeGenType.getValue(),
-                modification ? "修改" : "创建", prompt.length());
+                modification ? "修改" : "创建", agent ? "workflow" : "direct", prompt.length());
 
         GenerationTaskManager.GenerationTask task;
         try {
@@ -426,10 +429,26 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         AtomicBoolean stateMarked = new AtomicBoolean(false);
         // 只统计真实成功的文件变更工具事件；模型可以把工具记录写成文本，但伪造不出事件信封。
         AtomicInteger realFileMutations = new AtomicInteger();
-        Flux<String> source = aiCodeGeneratorFacade.generateAndSaveCodeStream(
+        Flux<String> source = (agent
+                ? codeGenWorkflow.executeWorkflowWithFlux(WorkflowRequest.builder()
+                .appId(appId)
+                .versionNo(version.getVersionNo())
+                .excludedMessageId(userHistory.getId())
+                .actorAccount(loginUser.getUserAccount())
+                .prompt(prompt)
+                .outputDirectory(versionDirectory)
+                // 修改轮把上一可用版本目录作为质检基线：质检只看本次变更的文件，
+                // 避免为存量代码问题反复重试（2026-09-24 实测 41 字符需求重试三轮 227 秒全废）。
+                .baselineDirectory(modification
+                        ? storageService.versionDirectory(appId, app.getCurrentVersion()) : null)
+                .generationType(codeGenType)
+                .modification(modification)
+                .build())
+                : aiCodeGeneratorFacade.generateAndSaveCodeStream(
                 appId, prompt, codeGenType,
-                        versionDirectory, userHistory.getId(),
-                        version.getVersionNo(), loginUser.getUserAccount(), modification)
+                versionDirectory, userHistory.getId(),
+                version.getVersionNo(), loginUser.getUserAccount(), modification)
+                )
                 .doOnNext(chunk -> {
                     String historyChunk = streamMessageHistoryFormatter.toHistoryText(chunk);
                     if (!historyChunk.isBlank() && aiMessage.length() < MAX_CHAT_HISTORY_MESSAGE_LENGTH) {

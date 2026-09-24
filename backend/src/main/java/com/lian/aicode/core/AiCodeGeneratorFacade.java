@@ -189,7 +189,7 @@ public class AiCodeGeneratorFacade {
                     return Flux.error(new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 未返回代码流"));
                 }
                 return processCodeStream(codeStream, codeGenType, outputDirectory,
-                        appId, versionNo, actorAccount, startedAt);
+                        appId, versionNo, actorAccount, modification, startedAt);
             } catch (RuntimeException exception) {
                 log.warn("AI 调用启动失败：appId={}, version={}, type={}, reason={}", appId, versionNo,
                         codeGenType.getValue(), exception.getClass().getSimpleName());
@@ -278,6 +278,7 @@ public class AiCodeGeneratorFacade {
                                            Long appId,
                                            Integer versionNo,
                                            String actorAccount,
+                                           boolean modification,
                                            long startedAt) {
         StringBuilder codeBuilder = new StringBuilder();
         return codeStream
@@ -289,9 +290,17 @@ public class AiCodeGeneratorFacade {
                 .concatWith(Flux.defer(() -> {
                     String completeCode = codeBuilder.toString();
                     Object parsedResult = codeParserExecutor.executeParser(completeCode, codeGenType);
-                    File savedDirectory = outputDirectory == null
-                            ? codeFileSaverExecutor.executeSaver(parsedResult, codeGenType)
-                            : codeFileSaverExecutor.executeSaver(parsedResult, codeGenType, outputDirectory);
+                    File savedDirectory;
+                    if (outputDirectory == null) {
+                        savedDirectory = codeFileSaverExecutor.executeSaver(parsedResult, codeGenType);
+                    } else if (modification) {
+                        // 工作流质检重试或应用迭代可能复用同一目录；先写临时目录再受控替换。
+                        savedDirectory = codeFileSaverExecutor.executeSaverReplacing(
+                                parsedResult, codeGenType, outputDirectory);
+                    } else {
+                        savedDirectory = codeFileSaverExecutor.executeSaver(
+                                parsedResult, codeGenType, outputDirectory);
+                    }
                     log.info("代码保存成功：appId={}, version={}, type={}, directory={}",
                             appId, versionNo, codeGenType.getValue(), savedDirectory.getName());
                     return Flux.empty();
