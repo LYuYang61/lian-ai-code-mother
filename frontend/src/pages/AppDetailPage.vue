@@ -28,12 +28,31 @@
         <a-card title="继续描述你的想法" :bordered="false">
           <a-textarea v-model:value="prompt" :rows="7" maxlength="10000" show-count :disabled="!canEdit"
             placeholder="例如：把按钮改成绿色，并增加暗色模式切换" @keydown.ctrl.enter="sendMessage" />
+          <a-alert v-if="selectedElementInfo" type="info" show-icon closable class="selected-element-alert"
+            @close="clearSelectedElement">
+            <template #message>
+              <div class="selected-element-info">
+                <div>
+                  已选中 <code>&lt;{{ selectedElementInfo.tagName.toLowerCase() }}&gt;</code>
+                  <span v-if="selectedElementInfo.id"> #{{ selectedElementInfo.id }}</span>
+                </div>
+                <div v-if="selectedElementInfo.pagePath">页面路径：{{ selectedElementInfo.pagePath }}</div>
+                <div v-if="selectedElementInfo.textContent">当前内容：{{ selectedElementInfo.textContent }}</div>
+                <code class="selected-element-selector">{{ selectedElementInfo.selector }}</code>
+              </div>
+            </template>
+          </a-alert>
           <a-space class="prompt-actions" wrap>
             <a-tag color="blue">{{ codeGenTypeText(app.codeGenType) }}</a-tag>
             <a-tag :color="app.visibility === 'public' ? 'green' : 'default'">
               {{ app.visibility === 'public' ? '公开' : '私有' }}
             </a-tag>
             <a-tag :color="statusColor(app.generationStatus)">{{ statusText(app.generationStatus) }}</a-tag>
+            <a-button v-if="previewUrl" size="small" :type="visualEditMode ? 'primary' : 'default'"
+              :danger="visualEditMode" :disabled="!canEdit || streaming"
+              @click="toggleVisualEditMode">
+              {{ visualEditMode ? '退出元素选择' : '选择页面元素' }}
+            </a-button>
           </a-space>
         </a-card>
 
@@ -136,7 +155,9 @@
             </a-space>
           </template>
           <div class="preview-frame-wrap">
-            <iframe v-if="previewUrl" :key="previewUrl" class="preview-frame" :src="previewUrl" title="应用预览" />
+            <iframe v-if="previewUrl" ref="previewFrameRef" :key="previewUrl" class="preview-frame"
+              :class="{ 'preview-editing': visualEditMode }" :src="previewUrl" title="应用预览"
+              @load="onPreviewLoad" />
             <a-empty v-else description="完成一次生成后，这里会显示预览" />
           </div>
         </a-card>
@@ -282,6 +303,7 @@ import type {
   CodeGenType,
 } from '@/api/types'
 import { useUserStore } from '@/stores/user'
+import { VisualEditor, type ElementInfo } from '@/utils/visualEditor'
 
 type StreamMessagePayload = {
   type?: 'ai_response' | 'thinking' | 'tool_request' | 'tool_executed' | string
@@ -338,6 +360,7 @@ const scrollHistoryToBottom = async () => {
   }
 }
 const prompt = ref('')
+const MAX_PROMPT_LENGTH = 10000
 const streamOutput = ref('')
 const thinkingOutput = ref('')
 const streaming = ref(false)
@@ -354,10 +377,23 @@ const editForm = reactive({
   tags: '',
   visibility: 'private' as 'private' | 'public',
 })
+const previewFrameRef = ref<HTMLIFrameElement | null>(null)
+const visualEditMode = ref(false)
+const selectedElementInfo = ref<ElementInfo | null>(null)
+const visualEditor = new VisualEditor({
+  onElementSelected: (elementInfo) => {
+    selectedElementInfo.value = elementInfo
+  },
+  onError: (errorMessage) => {
+    message.warning(errorMessage)
+    visualEditMode.value = false
+  },
+})
 let eventSource: EventSource | null = null
 let pageLoadSequence = 0
 let historyRequestSequence = 0
 let historyRequestAppId = ''
+let visualEditorMessageHandler: ((event: MessageEvent) => void) | null = null
 
 const appId = computed(() => String(route.params.id))
 const isCurrentPage = (sequence: number, requestedAppId: string) =>
@@ -412,6 +448,52 @@ const toolArgumentSummary = (argumentsText?: string) => {
   } catch {
     return ''
   }
+}
+
+const buildPromptWithSelectedElement = (basePrompt: string) => {
+  const info = selectedElementInfo.value
+  if (!info) return basePrompt
+  const normalize = (value: string, maxLength: number) => value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength)
+  const context = [
+    '可视化编辑目标（仅作为定位提示，必须以当前工程实际代码为准）：',
+    `- 页面路径：${normalize(info.pagePath, 240)}`,
+    `- 标签：${normalize(info.tagName, 40).toLowerCase()}`,
+    normalize(info.id, 120) ? `- 元素 ID：${normalize(info.id, 120)}` : '',
+    normalize(info.className, 240) ? `- 元素 class：${normalize(info.className, 240)}` : '',
+    `- 选择器：${normalize(info.selector, 500)}`,
+    normalize(info.textContent, 160) ? `- 当前内容：${normalize(info.textContent, 160)}` : '',
+  ].filter(Boolean).join('\n')
+  return `${basePrompt}\n\n${context}`
+}
+
+const clearSelectedElement = () => {
+  selectedElementInfo.value = null
+  visualEditor.clearSelection()
+}
+
+const toggleVisualEditMode = () => {
+  if (!previewFrameRef.value) {
+    message.warning('请等待预览页面加载完成')
+    return
+  }
+  visualEditor.init(previewFrameRef.value)
+  if (!visualEditor.canUseSameOrigin()) {
+    message.warning('可视化编辑要求预览地址与工作区同源，请使用 VITE_API_BASE_URL=/api')
+    return
+  }
+  const enabled = visualEditor.toggleEditMode()
+  visualEditMode.value = enabled
+  if (!enabled) clearSelectedElement()
+}
+
+const onPreviewLoad = () => {
+  if (!previewFrameRef.value) return
+  visualEditor.init(previewFrameRef.value)
+  visualEditor.onIframeLoad()
 }
 
 const appendStreamMessage = (payload: StreamMessagePayload) => {
@@ -614,6 +696,9 @@ const loadPage = async () => {
   // 先清空旧应用状态，避免路由复用或版本接口失败时继续展示旧应用内容。
   eventSource?.close()
   eventSource = null
+  visualEditor.disableEditMode()
+  visualEditMode.value = false
+  selectedElementInfo.value = null
   streaming.value = false
   app.value = null
   versions.value = []
@@ -659,12 +744,22 @@ const sendMessage = () => {
     if (!prompt.value.trim()) message.warning('请先描述需求')
     return
   }
+  const requestPrompt = buildPromptWithSelectedElement(prompt.value.trim())
+  if (requestPrompt.length > MAX_PROMPT_LENGTH) {
+    message.warning('需求描述加上元素定位信息后超过长度限制，请适当缩短描述')
+    return
+  }
+  clearSelectedElement()
+  if (visualEditMode.value) {
+    visualEditor.disableEditMode()
+    visualEditMode.value = false
+  }
   streaming.value = true
   streamOutput.value = ''
   thinkingOutput.value = ''
   const streamAppId = appId.value
   const streamSequence = pageLoadSequence
-  const source = new EventSource(createCodeStreamUrl(streamAppId, prompt.value.trim()), { withCredentials: true })
+  const source = new EventSource(createCodeStreamUrl(streamAppId, requestPrompt), { withCredentials: true })
   let streamSettled = false
   eventSource = source
   const isCurrentStream = () => isCurrentPage(streamSequence, streamAppId)
@@ -1110,13 +1205,28 @@ const statusColor = (status: AppGenerationStatus) => ({
   draft: 'default', generating: 'processing', ready: 'success', failed: 'error', cancelled: 'warning',
 }[status])
 
-onMounted(() => void loadPage())
+onMounted(() => {
+  visualEditorMessageHandler = (event: MessageEvent) => visualEditor.handleIframeMessage(event)
+  window.addEventListener('message', visualEditorMessageHandler)
+  void loadPage()
+})
 watch(appId, () => void loadPage())
+watch(previewUrl, (nextUrl, previousUrl) => {
+  if (nextUrl === previousUrl) return
+  visualEditor.disableEditMode()
+  visualEditMode.value = false
+  selectedElementInfo.value = null
+})
 onBeforeUnmount(() => {
   ++pageLoadSequence
   ++historyRequestSequence
   eventSource?.close()
   eventSource = null
+  if (visualEditorMessageHandler) {
+    window.removeEventListener('message', visualEditorMessageHandler)
+    visualEditorMessageHandler = null
+  }
+  visualEditor.dispose()
 })
 </script>
 
@@ -1136,6 +1246,26 @@ onBeforeUnmount(() => {
 
 .prompt-actions {
   margin-top: 14px;
+}
+
+.selected-element-alert {
+  margin-top: 12px;
+}
+
+.selected-element-info {
+  display: grid;
+  gap: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.selected-element-selector {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .stream-output {
@@ -1180,6 +1310,10 @@ onBeforeUnmount(() => {
   min-height: 560px;
   border: 0;
   background: white;
+}
+
+.preview-editing {
+  cursor: crosshair;
 }
 
 .history-scroll {
