@@ -48,6 +48,8 @@
               {{ app.visibility === 'public' ? '公开' : '私有' }}
             </a-tag>
             <a-tag :color="statusColor(app.generationStatus)">{{ statusText(app.generationStatus) }}</a-tag>
+            <a-switch v-model:checked="agentMode" :disabled="!canEdit || streaming"
+              checked-children="工作流" un-checked-children="直连" />
             <a-button v-if="previewUrl" size="small" :type="visualEditMode ? 'primary' : 'default'"
               :danger="visualEditMode" :disabled="!canEdit || streaming"
               @click="toggleVisualEditMode">
@@ -314,6 +316,10 @@ type StreamMessagePayload = {
   arguments?: string
   result?: string
   d?: string
+  step?: string
+  message?: string
+  attempt?: number
+  imageCount?: number
 }
 
 const route = useRoute()
@@ -361,6 +367,7 @@ const scrollHistoryToBottom = async () => {
 }
 const prompt = ref('')
 const MAX_PROMPT_LENGTH = 10000
+const agentMode = ref(false)
 const streamOutput = ref('')
 const thinkingOutput = ref('')
 const streaming = ref(false)
@@ -510,6 +517,15 @@ const appendStreamMessage = (payload: StreamMessagePayload) => {
     case 'tool_executed':
       streamOutput.value += `\n\n[工具调用] ${payload.displayName || payload.name || '文件工具'}${toolArgumentSummary(payload.arguments)}\n`
       if (payload.result) streamOutput.value += `${payload.result}\n`
+      break
+    case 'workflow_start':
+    case 'workflow_step':
+    case 'workflow_quality':
+    case 'workflow_completed':
+    case 'workflow_error':
+      if (payload.message) {
+        streamOutput.value += `\n[工作流] ${payload.message}${payload.step ? `：${payload.step}` : ''}\n`
+      }
       break
     default:
       streamOutput.value += payload.data || ''
@@ -759,7 +775,7 @@ const sendMessage = () => {
   thinkingOutput.value = ''
   const streamAppId = appId.value
   const streamSequence = pageLoadSequence
-  const source = new EventSource(createCodeStreamUrl(streamAppId, requestPrompt), { withCredentials: true })
+  const source = new EventSource(createCodeStreamUrl(streamAppId, requestPrompt, agentMode.value), { withCredentials: true })
   let streamSettled = false
   eventSource = source
   const isCurrentStream = () => isCurrentPage(streamSequence, streamAppId)

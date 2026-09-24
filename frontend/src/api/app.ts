@@ -166,8 +166,8 @@ export function adminDeleteApp(id: string) {
   return request.post<BaseResponse<boolean>>('/app/admin/delete', { id })
 }
 
-export function createCodeStreamUrl(appId: string, message: string) {
-  const search = new URLSearchParams({ appId, message })
+export function createCodeStreamUrl(appId: string, message: string, agent = false) {
+  const search = new URLSearchParams({ appId, message, agent: String(agent) })
   return `${API_BASE_URL}/app/chat/gen/code?${search.toString()}`
 }
 
