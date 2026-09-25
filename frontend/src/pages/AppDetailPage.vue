@@ -457,11 +457,15 @@ const toolArgumentSummary = (argumentsText?: string) => {
   }
 }
 
+// \p{Cc}（u 标志）覆盖 C0/C1 全部不可见控制字符；不用字面量控制字符区间，
+// 避免 oxlint 的 no-control-regex 告警。
+const CONTROL_CHARACTERS = /\p{Cc}/gu
+
 const buildPromptWithSelectedElement = (basePrompt: string) => {
   const info = selectedElementInfo.value
   if (!info) return basePrompt
   const normalize = (value: string, maxLength: number) => value
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(CONTROL_CHARACTERS, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength)
@@ -831,6 +835,20 @@ const sendMessage = () => {
       message.error('生成连接中断')
     }
     void refreshApp()
+  })
+  // 第十期：限流等在流开始前触发的异常由后端以 business-error 事件透出（HTTP 200 + SSE），
+  // 后端随后会发送 done 事件，closeStream 的 streamSettled 守卫保证这里先到先处理。
+  source.addEventListener('business-error', (event: Event) => {
+    if (!closeStream()) return
+    const customEvent = event as MessageEvent<string>
+    let errorMessage = '请求过于频繁，请稍后再试'
+    try {
+      const payload = JSON.parse(customEvent.data) as { message?: string }
+      if (payload.message) errorMessage = payload.message
+    } catch {
+      // 事件体不是 JSON 时使用默认文案，仍然精确结束本次流。
+    }
+    message.warning(errorMessage)
   })
 }
 
