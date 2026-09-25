@@ -23,3 +23,8 @@ app:
   ai:
     chat-memory:
       enabled: false
+  # 离线测试不依赖 Redis：精选列表缓存退化为 NoOp，限流直接关闭（切面放行）。
+  cache:
+    enabled: false
+  rate-limit:
+    enabled: false

@@ -1,6 +1,6 @@
 package com.lian.aicode.workflow.node;
 
-import com.lian.aicode.ai.AiCodeGenTypeRoutingService;
+import com.lian.aicode.ai.AiCodeGenTypeRoutingServiceFactory;
 import com.lian.aicode.ai.CodeGenTypeRoutingHeuristic;
 import com.lian.aicode.model.enums.CodeGenTypeEnum;
 import com.lian.aicode.workflow.model.WorkflowContext;
@@ -20,7 +20,7 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 @RequiredArgsConstructor
 public class RouterNode {
 
-    private final ObjectProvider<AiCodeGenTypeRoutingService> routingServiceProvider;
+    private final ObjectProvider<AiCodeGenTypeRoutingServiceFactory> routingServiceFactoryProvider;
 
     public AsyncNodeAction<MessagesState<String>> action(WorkflowRuntime runtime) {
         return node_async(state -> {
@@ -31,10 +31,12 @@ public class RouterNode {
             runtime.checkCancelled();
             CodeGenTypeEnum type = context.getGenerationType();
             if (type == null) {
-                AiCodeGenTypeRoutingService service = routingServiceProvider.getIfAvailable();
+                // 工作流并发运行时按次创建路由服务（prototype 模型 + 结果缓存），不共享模型实例。
+                AiCodeGenTypeRoutingServiceFactory factory = routingServiceFactoryProvider.getIfAvailable();
                 try {
-                    type = service == null ? CodeGenTypeRoutingHeuristic.choose(context.getOriginalPrompt())
-                            : service.routeCodeGenType(context.getOriginalPrompt());
+                    type = factory == null
+                            ? CodeGenTypeRoutingHeuristic.choose(context.getOriginalPrompt())
+                            : factory.createAiCodeGenTypeRoutingService().routeCodeGenType(context.getOriginalPrompt());
                 } catch (RuntimeException exception) {
                     log.warn("工作流 AI 类型路由失败，使用确定性回退：reason={}", exception.getClass().getSimpleName());
                     type = CodeGenTypeRoutingHeuristic.choose(context.getOriginalPrompt());

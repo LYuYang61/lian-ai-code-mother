@@ -120,10 +120,14 @@ class AppLifecycleFlowTest {
         mockMvc.perform(get("/app/get/vo").param("id", appId).session(collaboratorSession))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value(appId));
+        // 第十期起，进入流式响应前的业务异常（权限、限流等）以 business-error 事件透出，
+        // 前端 EventSource 能拿到精确文案；这里验证权限拒绝码仍然可达。
         mockMvc.perform(get("/app/chat/gen/code").session(collaboratorSession)
                         .param("appId", appId).param("message", "只读用户不应生成"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.code").value(40101));
+                .andExpect(content().string(containsString("event:business-error")))
+                .andExpect(content().string(containsString("\"code\":40101")))
+                .andExpect(content().string(containsString("event:done")));
         mockMvc.perform(post("/app/collaborator/add").session(ownerSession)
                         .contentType(APPLICATION_JSON)
                         .content("{\"appId\":\"" + appId + "\",\"userId\":\""
@@ -275,6 +279,17 @@ class AppLifecycleFlowTest {
                         .content("{\"pageNum\":1,\"pageSize\":20,\"tag\":\"工具\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.total").value(1));
+
+        // 构建状态接口（第十期扩展）：multi_file 类型无需构建；匿名访问应被登录校验拦截。
+        mockMvc.perform(get("/app/build/status").session(ownerSession)
+                        .param("appId", appId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("not_applicable"))
+                .andExpect(jsonPath("$.data.building").value(false))
+                .andExpect(jsonPath("$.data.versionNo").value(1));
+        mockMvc.perform(get("/app/build/status").param("appId", appId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40100));
 
         mockMvc.perform(post("/app/delete")
                         .session(ownerSession).contentType(APPLICATION_JSON)

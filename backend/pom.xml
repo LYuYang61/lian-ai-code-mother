@@ -35,6 +35,8 @@
         <langgraph4j.version>1.9.1</langgraph4j.version>
         <!-- 阿里云 Model Studio 官方 Java SDK，用于可选的文生图工具。 -->
         <dashscope.version>2.23.1</dashscope.version>
+        <!-- Redisson 只用于第十期限流；与 Spring Data Redis 各自独立连接互不干扰。 -->
+        <redisson.version>3.50.0</redisson.version>
     </properties>
 
     <dependencies>
@@ -66,6 +68,22 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- Spring Cache 抽象：@EnableCaching 与 @Cacheable 注解的入口，底层缓存管理器由本项目显式配置为 Redis。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache</artifactId>
+        </dependency>
+
+        <!--
+            Redisson 提供基于令牌桶的分布式限流器 RRateLimiter，用于 AI 对话接口限流。
+            客户端由本项目懒初始化：Redis 不可用时限流自动降级放行，不阻塞应用启动。
+        -->
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>${redisson.version}</version>
         </dependency>
 
         <!-- Spring Boot 3.5 对应的 Spring Session Redis 模块，版本由 Boot BOM 管理。 -->

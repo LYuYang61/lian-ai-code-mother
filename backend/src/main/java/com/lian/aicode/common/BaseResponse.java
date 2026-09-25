@@ -27,6 +27,10 @@ public class BaseResponse<T> implements Serializable {
 
     private String message;
 
+    /** 反序列化需要默认构造器（如精选列表的 Redis 缓存值还原）；字段访问统一走 getter/setter。 */
+    public BaseResponse() {
+    }
+
     public BaseResponse(int code, T data, String message) {
         this.code = code;
         this.data = data;

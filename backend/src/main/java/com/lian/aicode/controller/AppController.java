@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lian.aicode.common.BaseResponse;
 import com.lian.aicode.common.ResultUtils;
+import com.lian.aicode.config.RedisCacheManagerConfig;
 import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.model.dto.app.AppAddRequest;
@@ -16,12 +17,15 @@ import com.lian.aicode.model.dto.app.AppUpdateRequest;
 import com.lian.aicode.model.dto.app.AppVersionRequest;
 import com.lian.aicode.model.dto.common.IdRequest;
 import com.lian.aicode.model.entity.UserAccount;
+import com.lian.aicode.model.vo.AppBuildStatusVO;
 import com.lian.aicode.model.vo.AppVersionDiffVO;
 import com.lian.aicode.model.vo.AppVersionVO;
 import com.lian.aicode.model.vo.AppVO;
 import com.lian.aicode.model.vo.AppCollaboratorVO;
 import com.lian.aicode.model.vo.ChatHistoryVO;
 import com.lian.aicode.model.vo.PageResult;
+import com.lian.aicode.ratelimit.RateLimit;
+import com.lian.aicode.ratelimit.RateLimitType;
 import com.lian.aicode.service.AppService;
 import com.lian.aicode.service.GenerationCancelledException;
 import com.lian.aicode.service.ProjectDownloadService;
@@ -33,6 +37,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
@@ -67,6 +72,12 @@ public class AppController {
 
     @Operation(summary = "SSE 流式生成应用代码")
     @GetMapping(value = "/chat/gen/code", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    // AI 生成是成本最高的接口：用户维度默认 60 秒 5 次，可用 app.rate-limit.chat-gen-code.* 覆盖。
+    // key 的写法必须与配置段名一致（Environment.getProperty 不做宽松绑定）。
+    // 切面对未登录请求直接放行，未登录语义由 getLoginUser 统一返回；限流触发时异常经
+    // GlobalExceptionHandler 以 business-error 事件透出给 SSE 客户端。
+    @RateLimit(key = "chat-gen-code", limitType = RateLimitType.USER,
+            rate = 5, rateInterval = 60, message = "AI 对话请求过于频繁，请稍后再试")
     public Flux<ServerSentEvent<String>> chatToGenCode(@RequestParam Long appId,
                                                        @RequestParam String message,
                                                        @RequestParam(defaultValue = "false") boolean agent,
@@ -133,6 +144,11 @@ public class AppController {
 
     @Operation(summary = "分页查询精选公开应用")
     @PostMapping("/good/list/page/vo")
+    // 精选列表由管理员手工维护、更新频率低，采用旁路缓存：命中直接返回，未命中查库后回填。
+    // key 由完整查询条件生成，天然区分分页/搜索/分类/标签组合；仅缓存前 10 页。
+    @Cacheable(value = RedisCacheManagerConfig.GOOD_APP_PAGE_CACHE,
+            key = "T(com.lian.aicode.utils.CacheKeyUtils).generateKey(#request)",
+            condition = "#request != null && #request.pageNum <= 10")
     public BaseResponse<PageResult<AppVO>> listGood(@Valid @RequestBody AppQueryRequest request) {
         return ResultUtils.success(appService.listFeaturedApps(request));
     }
@@ -170,6 +186,13 @@ public class AppController {
     public BaseResponse<java.util.List<AppVersionVO>> listVersions(@RequestParam Long appId,
                                                                     HttpServletRequest request) {
         return ResultUtils.success(appService.listVersions(appId, optionalLoginUser(request)));
+    }
+
+    @Operation(summary = "查询应用当前版本的构建状态")
+    @GetMapping("/build/status")
+    public BaseResponse<AppBuildStatusVO> buildStatus(@RequestParam Long appId,
+                                                      HttpServletRequest request) {
+        return ResultUtils.success(appService.getBuildStatus(appId, userService.getLoginUser(request)));
     }
 
     @Operation(summary = "回滚应用版本")

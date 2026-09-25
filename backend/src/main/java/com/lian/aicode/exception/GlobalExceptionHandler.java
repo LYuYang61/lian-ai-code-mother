@@ -4,6 +4,7 @@ import com.lian.aicode.common.BaseResponse;
 import com.lian.aicode.common.ResultUtils;
 import io.swagger.v3.oas.annotations.Hidden;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -17,8 +18,9 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
  * <p>Knife4j 的 OpenAPI 3 扫描不应把异常处理器当作业务接口；{@link Hidden} 同时规避
  * Spring Boot 3.5 与旧版文档扫描逻辑之间的 ControllerAdvice 兼容问题。</p>
  *
- * <p>这里只处理普通 JSON 请求。未来增加 SSE/流式接口时，应在流处理器中定义专用错误事件，
- * 不要在响应已经提交后再次写普通 JSON。</p>
+ * <p>第十期起对进入流式响应之前的异常（如限流触发）增加 SSE 分支：请求尚未提交响应时，
+ * 通过 {@link SseErrorResponseWriter} 以 {@code business-error} + {@code done} 事件透出，
+ * 前端能拿到精确文案；普通 JSON 请求仍走统一 {@code BaseResponse}。</p>
  */
 @Hidden
 @Slf4j
@@ -26,17 +28,28 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
-    public BaseResponse<?> handleBusinessException(BusinessException exception, HttpServletRequest request) {
+    public BaseResponse<?> handleBusinessException(BusinessException exception, HttpServletRequest request,
+                                                   HttpServletResponse response) {
         log.warn("业务请求失败：method={}, uri={}, code={}",
                 request.getMethod(), request.getRequestURI(), exception.getCode());
+        // SSE 请求（限流等在流开始前触发的异常）以事件透出，返回 null 表示响应已提交。
+        if (SseErrorResponseWriter.tryWrite(request, response,
+                exception.getCode(), exception.getMessage())) {
+            return null;
+        }
         return ResultUtils.error(exception.getCode(), exception.getMessage());
     }
 
     @ExceptionHandler(Exception.class)
-    public BaseResponse<?> handleUnexpectedException(Exception exception, HttpServletRequest request) {
+    public BaseResponse<?> handleUnexpectedException(Exception exception, HttpServletRequest request,
+                                                     HttpServletResponse response) {
         // 详细堆栈只写服务端日志，响应不暴露数据库、文件路径或第三方服务信息。
         log.error("未处理的请求异常：method={}, uri={}",
                 request.getMethod(), request.getRequestURI(), exception);
+        if (SseErrorResponseWriter.tryWrite(request, response,
+                ErrorCode.SYSTEM_ERROR.getCode(), ErrorCode.SYSTEM_ERROR.getMessage())) {
+            return null;
+        }
         return ResultUtils.error(ErrorCode.SYSTEM_ERROR);
     }
 

@@ -1,11 +1,19 @@
 package com.lian.aicode.model.vo;
 
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
-/** 应用对外视图，聚合所有者和当前生成/部署状态。 */
+/**
+ * 应用对外视图，聚合所有者和当前生成/部署状态。
+ *
+ * <p>NoArgs/AllArgs 构造器供 Jackson 反序列化使用（精选列表缓存值包含本视图）。</p>
+ */
 @Data
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class AppVO {
 
     private Long id;

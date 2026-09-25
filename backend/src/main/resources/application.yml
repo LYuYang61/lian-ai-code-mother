@@ -121,6 +121,24 @@ app:
       timeout: ${AI_WORKFLOW_DASHSCOPE_TIMEOUT:90s}
   collaboration:
     max-members: ${APP_COLLABORATION_MAX_MEMBERS:20}
+  cache:
+    # 首页精选列表等只读列表的旁路缓存开关；关闭时使用 NoOp 缓存管理器，行为等同无缓存。
+    enabled: ${APP_CACHE_ENABLED:true}
+    # 默认缓存区域过期时间；精选列表单独配置更短的 TTL。
+    default-ttl: ${APP_CACHE_DEFAULT_TTL:30m}
+    good-app-page-ttl: ${APP_CACHE_GOOD_APP_PAGE_TTL:5m}
+    # 智能路由结果缓存（成本优化）：相同需求描述直接复用上一次路由结论，减少模型调用。
+    codegen-route:
+      enabled: ${AI_ROUTE_CACHE_ENABLED:true}
+      ttl: ${AI_ROUTE_CACHE_TTL:6h}
+      key-prefix: ${AI_ROUTE_CACHE_KEY_PREFIX:lian:cache:codegen-route}
+  rate-limit:
+    # AI 对话接口限流开关；开启后 Redis 不可用时自动降级放行（fail-open），不阻塞业务。
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    # /app/chat/gen/code 的用户级限流参数，覆盖 @RateLimit 注解上的默认值。
+    chat-gen-code:
+      rate: ${RATE_LIMIT_CHAT_GEN_CODE_RATE:5}
+      interval-seconds: ${RATE_LIMIT_CHAT_GEN_CODE_INTERVAL:60}
   chat-history:
     max-message-length: ${CHAT_HISTORY_MAX_MESSAGE_LENGTH:20000}
     cursor-page-size: ${CHAT_HISTORY_CURSOR_PAGE_SIZE:10}

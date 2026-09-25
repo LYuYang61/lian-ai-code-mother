@@ -11,6 +11,7 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.service.AiServices;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -22,9 +23,15 @@ import java.time.Duration;
 /**
  * AI Service 创建和应用级会话隔离适配层。
  *
- * <p>应用名称和摘要使用无状态默认服务；代码生成使用按 appId 缓存的独立服务实例。
+ * <p>应用名称和摘要使用按次创建的无状态服务；代码生成使用按 appId 缓存的独立服务实例。
  * 每个实例绑定独立的 ChatMemory，避免不同应用之间共享上下文，也保留 Caffeine 的容量和过期
  * 边界，防止长时间运行的后端进程无限持有对象。</p>
+ *
+ * <p>第十期起模型实例改为 prototype 作用域：每次构建 AI Service 都从
+ * {@code chatModelPrototype} / {@code streamingChatModelPrototype} 获取全新模型，
+ * 不同应用、不同任务的请求不再共享同一个模型对象（教程 11 期“AI 并发调用”的多例方案）。
+ * 原型模型由 {@code StreamingChatModelConfig} / {@code GenerationChatModelConfig} 提供，
+ * 本工厂不持有任何单例模型引用。</p>
  */
 @Slf4j
 @Configuration
@@ -36,8 +43,8 @@ public class AiCodeGeneratorServiceFactory {
 
     private static final int MAX_MEMORY_MESSAGES = 200;
 
-    private final ChatModel chatModel;
-    private final StreamingChatModel streamingChatModel;
+    private final ObjectProvider<ChatModel> chatModelPrototypeProvider;
+    private final ObjectProvider<StreamingChatModel> streamingChatModelPrototypeProvider;
     private final RedisChatMemoryStore redisChatMemoryStore;
     private final ChatHistoryService chatHistoryService;
     private final boolean chatMemoryEnabled;
@@ -47,17 +54,18 @@ public class AiCodeGeneratorServiceFactory {
     private final Duration expireAfterAccess;
     private final Cache<Long, AiCodeGeneratorService> appServiceCache;
 
-    public AiCodeGeneratorServiceFactory(@Qualifier("openAiChatModel") ChatModel chatModel,
-                                         StreamingChatModel streamingChatModel,
-                                         RedisChatMemoryStore redisChatMemoryStore,
-                                         ChatHistoryService chatHistoryService,
-                                         @Value("${app.ai.chat-memory.enabled:true}") boolean chatMemoryEnabled,
-                                         @Value("${app.ai.chat-memory.max-messages:20}") int maxMessages,
-                                         @Value("${app.ai.chat-memory.service-cache-max-size:1000}") long serviceCacheMaxSize,
-                                         @Value("${app.ai.chat-memory.service-cache-expire-after-write:30m}") Duration expireAfterWrite,
-                                         @Value("${app.ai.chat-memory.service-cache-expire-after-access:10m}") Duration expireAfterAccess) {
-        this.chatModel = chatModel;
-        this.streamingChatModel = streamingChatModel;
+    public AiCodeGeneratorServiceFactory(
+            @Qualifier("chatModelPrototype") ObjectProvider<ChatModel> chatModelPrototypeProvider,
+            @Qualifier("streamingChatModelPrototype") ObjectProvider<StreamingChatModel> streamingChatModelPrototypeProvider,
+            RedisChatMemoryStore redisChatMemoryStore,
+            ChatHistoryService chatHistoryService,
+            @Value("${app.ai.chat-memory.enabled:true}") boolean chatMemoryEnabled,
+            @Value("${app.ai.chat-memory.max-messages:20}") int maxMessages,
+            @Value("${app.ai.chat-memory.service-cache-max-size:1000}") long serviceCacheMaxSize,
+            @Value("${app.ai.chat-memory.service-cache-expire-after-write:30m}") Duration expireAfterWrite,
+            @Value("${app.ai.chat-memory.service-cache-expire-after-access:10m}") Duration expireAfterAccess) {
+        this.chatModelPrototypeProvider = chatModelPrototypeProvider;
+        this.streamingChatModelPrototypeProvider = streamingChatModelPrototypeProvider;
         this.redisChatMemoryStore = redisChatMemoryStore;
         this.chatHistoryService = chatHistoryService;
         this.chatMemoryEnabled = chatMemoryEnabled;
@@ -74,17 +82,17 @@ public class AiCodeGeneratorServiceFactory {
                 .removalListener((Long appId, AiCodeGeneratorService service, com.github.benmanes.caffeine.cache.RemovalCause cause) ->
                         log.info("移除应用 AI 服务缓存：appId={}, reason={}", appId, cause))
                 .build();
-        log.info("初始化 AI 服务工厂：chatMemoryEnabled={}, maxMessages={}, cacheMaxSize={}",
+        log.info("初始化 AI 服务工厂：chatMemoryEnabled={}, maxMessages={}, cacheMaxSize={}, modelScope=prototype",
                 chatMemoryEnabled, this.maxMessages, this.serviceCacheMaxSize);
     }
 
     /**
-     * 默认无状态服务只负责应用命名和摘要等跨应用操作，不访问 Redis。
-     * 这样只配置 API Key、但尚未启动 Redis 时，基础应用仍可启动。
+     * 兼容保留的默认无状态服务：供门面回退路径和测试桩注入使用。
+     * 生产环境的应用命名/摘要优先使用 {@link #getForStatelessTask()} 按次实例。
      */
     @Bean
     public AiCodeGeneratorService aiCodeGeneratorService() {
-        return buildService(null);
+        return buildStatelessService();
     }
 
     /** 获取指定应用的独立 AI Service。 */
@@ -104,6 +112,16 @@ public class AiCodeGeneratorServiceFactory {
     }
 
     /**
+     * 创建一次性的无状态 AI Service（应用命名、对话摘要等跨应用操作）。
+     *
+     * <p>每次调用都使用全新的原型模型实例：命名发生在应用创建的高并发入口上，
+     * 摘要发生在有界线程池中，按次创建让这些同步模型调用之间不存在共享模型对象。</p>
+     */
+    public AiCodeGeneratorService getForStatelessTask() {
+        return buildStatelessService();
+    }
+
+    /**
      * 创建一次性的 Vue 工程 AI Service。
      *
      * <p>工具绑定的是具体版本目录，不能放进按 appId 缓存的服务，否则同一个应用的两个
@@ -116,8 +134,8 @@ public class AiCodeGeneratorServiceFactory {
         }
         MessageWindowChatMemory memory = createChatMemory(appId, excludedMessageId);
         AiCodeGeneratorService service = AiServices.builder(AiCodeGeneratorService.class)
-                .chatModel(chatModel)
-                .streamingChatModel(streamingChatModel)
+                .chatModel(chatModelPrototypeProvider.getObject())
+                .streamingChatModel(streamingChatModelPrototypeProvider.getObject())
                 .chatMemoryProvider(memoryId -> memory)
                 .tools(toolBundle.tools())
                 // 模型偶尔会返回不存在的工具名；把错误交回模型，而不是让请求静默成功。
@@ -152,24 +170,26 @@ public class AiCodeGeneratorServiceFactory {
         return service;
     }
 
-    private AiCodeGeneratorService buildService(Long appId) {
-        return buildService(appId, null);
+    private AiCodeGeneratorService buildStatelessService() {
+        // 接口包含带 @MemoryId 的 Vue 方法；即使无状态服务暂时不用记忆，
+        // LangChain4j 仍要求在构建代理时声明 ChatMemoryProvider。
+        return AiServices.builder(AiCodeGeneratorService.class)
+                .chatModel(chatModelPrototypeProvider.getObject())
+                .streamingChatModel(streamingChatModelPrototypeProvider.getObject())
+                .chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
+                        .id(memoryId)
+                        .maxMessages(maxMessages)
+                        .build())
+                .build();
     }
 
     private AiCodeGeneratorService buildService(Long appId, Long excludedMessageId) {
-        var builder = AiServices.builder(AiCodeGeneratorService.class)
-                .chatModel(chatModel)
-                .streamingChatModel(streamingChatModel);
-        if (appId == null) {
-            // 接口包含带 @MemoryId 的 Vue 方法；即使默认命名/摘要服务暂时不用记忆，
-            // LangChain4j 仍要求在构建代理时声明 ChatMemoryProvider。
-            return builder.chatMemoryProvider(memoryId -> MessageWindowChatMemory.builder()
-                    .id(memoryId)
-                    .maxMessages(maxMessages)
-                    .build()).build();
-        }
         var chatMemory = createChatMemory(appId, excludedMessageId);
-        return builder.chatMemoryProvider(memoryId -> chatMemory).build();
+        return AiServices.builder(AiCodeGeneratorService.class)
+                .chatModel(chatModelPrototypeProvider.getObject())
+                .streamingChatModel(streamingChatModelPrototypeProvider.getObject())
+                .chatMemoryProvider(memoryId -> chatMemory)
+                .build();
     }
 
     private MessageWindowChatMemory createChatMemory(Long appId, Long excludedMessageId) {

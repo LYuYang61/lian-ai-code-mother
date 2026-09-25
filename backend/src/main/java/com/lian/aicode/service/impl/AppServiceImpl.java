@@ -3,7 +3,9 @@ package com.lian.aicode.service.impl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lian.aicode.ai.AiCodeGenTypeRoutingService;
+import com.lian.aicode.ai.AiCodeGenTypeRoutingServiceFactory;
 import com.lian.aicode.ai.AiCodeGeneratorService;
+import com.lian.aicode.ai.AiCodeGeneratorServiceFactory;
 import com.lian.aicode.ai.CodeGenTypeRoutingHeuristic;
 import com.lian.aicode.ai.model.AppNameResult;
 import com.lian.aicode.ai.model.message.StreamMessageTypeEnum;
@@ -30,6 +32,7 @@ import com.lian.aicode.model.enums.AppVersionStatusEnum;
 import com.lian.aicode.model.enums.AppVisibilityEnum;
 import com.lian.aicode.model.enums.ChatHistoryMessageTypeEnum;
 import com.lian.aicode.model.enums.CodeGenTypeEnum;
+import com.lian.aicode.model.vo.AppBuildStatusVO;
 import com.lian.aicode.model.vo.AppVersionDiffVO;
 import com.lian.aicode.model.vo.AppVersionVO;
 import com.lian.aicode.model.vo.AppCollaboratorVO;
@@ -67,6 +70,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -107,7 +111,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     private final AppCollaboratorService collaboratorService;
     private final ChatHistoryService chatHistoryService;
     private final AiCodeGeneratorFacade aiCodeGeneratorFacade;
+    private final ObjectProvider<AiCodeGeneratorServiceFactory> aiCodeGeneratorServiceFactoryProvider;
     private final ObjectProvider<AiCodeGeneratorService> aiCodeGeneratorServiceProvider;
+    private final ObjectProvider<AiCodeGenTypeRoutingServiceFactory> aiCodeGenTypeRoutingServiceFactoryProvider;
     private final ObjectProvider<AiCodeGenTypeRoutingService> aiCodeGenTypeRoutingServiceProvider;
     private final ObjectMapper objectMapper;
     private final AppStorageService storageService;
@@ -672,6 +678,74 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         }
         List<AppVersion> versions = appVersionMapper.selectListByQuery(query.orderBy("version_no", false));
         return versions.stream().map(this::toVersionVO).toList();
+    }
+
+    /**
+     * 构建状态只读诊断（教程 11 期扩展思路）。
+     *
+     * <p>同步打包模式下 {@code building} 恒为 false：版本在 ready 之前不会对预览开放，
+     * 该接口用于自查“预览 404/内容是旧版”时的构建产物状态，不用于轮询进度。</p>
+     */
+    @Override
+    public AppBuildStatusVO getBuildStatus(Long appId, UserAccount loginUser) {
+        requireLogin(loginUser);
+        App app = requireApp(appId);
+        if (!canManage(app, loginUser) && !collaboratorService.canEdit(app, loginUser)) {
+            log.warn("构建状态查询权限校验失败：actor={}, appId={}, result=拒绝",
+                    loginUser.getUserAccount(), appId);
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR,
+                    "只有应用创建者、编辑协作者或管理员可以查询构建状态");
+        }
+        CodeGenTypeEnum type = CodeGenTypeEnum.getEnumByValue(app.getCodeGenType());
+        int versionNo = app.getCurrentVersion() == null ? 0 : app.getCurrentVersion();
+        AppBuildStatusVO.AppBuildStatusVOBuilder builder = AppBuildStatusVO.builder()
+                .appId(appId)
+                .codeGenType(app.getCodeGenType())
+                .versionNo(versionNo)
+                .building(false);
+        if (type != CodeGenTypeEnum.VUE_PROJECT) {
+            log.info("查询应用构建状态：actor={}, appId={}, type={}, result=无需构建",
+                    loginUser.getUserAccount(), appId, app.getCodeGenType());
+            return builder.status("not_applicable")
+                    .message("该代码生成类型无需构建，文件保存后即可预览")
+                    .build();
+        }
+        if (versionNo <= 0) {
+            return builder.status("not_found").message("应用尚未生成任何版本").build();
+        }
+        AppVersion version = appVersionMapper.selectOneByQuery(QueryWrapper.create()
+                .eq("app_id", appId).eq("version_no", versionNo));
+        if (version == null) {
+            return builder.status("not_found").message("当前版本记录不存在").build();
+        }
+        Path projectRoot = storageService.resolveVersionPath(version.getRelativePath());
+        boolean projectExists = Files.isDirectory(projectRoot);
+        boolean distExists = isSafeVueDist(storageService.projectDistDirectory(appId, versionNo));
+        String status = distExists ? "completed" : (projectExists ? "pending" : "not_found");
+        String message = switch (status) {
+            case "completed" -> "构建产物已就绪，可直接预览";
+            case "pending" -> "工程文件已生成但缺少构建产物，请重新部署或回滚后重试";
+            default -> "当前版本目录不存在";
+        };
+        String buildTime = readDistBuildTime(appId, versionNo);
+        log.info("查询应用构建状态：actor={}, appId={}, version={}, status={}, projectExists={}, distExists={}",
+                loginUser.getUserAccount(), appId, versionNo, status, projectExists, distExists);
+        return builder.projectExists(projectExists).distExists(distExists)
+                .status(status).message(message).buildTime(buildTime).build();
+    }
+
+    /** 读取 dist/index.html 的最后修改时间作为构建时间；读取失败不影响状态本身。 */
+    private String readDistBuildTime(Long appId, Integer versionNo) {
+        Path index = storageService.projectDistDirectory(appId, versionNo).resolve("index.html");
+        try {
+            if (!Files.isRegularFile(index) || Files.isSymbolicLink(index)) {
+                return null;
+            }
+            return Instant.ofEpochMilli(Files.getLastModifiedTime(index).toMillis()).toString();
+        } catch (IOException exception) {
+            log.warn("读取构建产物时间失败：appId={}, version={}", appId, versionNo);
+            return null;
+        }
     }
 
     @Override
@@ -1363,7 +1437,11 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     }
 
     private String generateAppName(String prompt, String actorAccount) {
-        AiCodeGeneratorService aiService = aiCodeGeneratorServiceProvider.getIfAvailable();
+        // 命名是高频入口：优先用按次创建的无状态服务（prototype 模型），工厂缺席时回退默认服务。
+        AiCodeGeneratorServiceFactory serviceFactory = aiCodeGeneratorServiceFactoryProvider.getIfAvailable();
+        AiCodeGeneratorService aiService = serviceFactory != null
+                ? serviceFactory.getForStatelessTask()
+                : aiCodeGeneratorServiceProvider.getIfAvailable();
         if (aiService != null) {
             long startedAt = System.nanoTime();
             log.info("AI 应用命名开始：actor={}, promptLength={}", actorAccount, prompt.length());
@@ -1397,7 +1475,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             log.info("代码生成类型选择：actor={}, type={}, source=explicit", actorAccount, explicitType.getValue());
             return new CodeGenTypeRoutingDecision(explicitType, "explicit");
         }
-        AiCodeGenTypeRoutingService routingService = aiCodeGenTypeRoutingServiceProvider.getIfAvailable();
+        // 路由是创建应用入口上的模型调用：按次创建服务（prototype 模型 + 结果缓存），支持并发创建。
+        AiCodeGenTypeRoutingServiceFactory routingFactory =
+                aiCodeGenTypeRoutingServiceFactoryProvider.getIfAvailable();
+        AiCodeGenTypeRoutingService routingService = routingFactory != null
+                ? routingFactory.createAiCodeGenTypeRoutingService()
+                : aiCodeGenTypeRoutingServiceProvider.getIfAvailable();
         if (routingService != null) {
             try {
                 CodeGenTypeEnum routedType = routingService.routeCodeGenType(prompt);

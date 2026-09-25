@@ -8,6 +8,7 @@ import com.lian.aicode.model.dto.app.AppQueryRequest;
 import com.lian.aicode.model.dto.app.AppUpdateRequest;
 import com.lian.aicode.model.entity.App;
 import com.lian.aicode.model.entity.UserAccount;
+import com.lian.aicode.model.vo.AppBuildStatusVO;
 import com.lian.aicode.model.vo.AppVersionDiffVO;
 import com.lian.aicode.model.vo.AppVersionVO;
 import com.lian.aicode.model.vo.AppVO;
@@ -58,6 +59,9 @@ public interface AppService {
     String enableDeployment(Long appId, UserAccount loginUser);
 
     List<AppVersionVO> listVersions(Long appId, UserAccount loginUser);
+
+    /** 查询应用当前版本的构建状态（只读诊断）；创建者、编辑协作者或管理员可查。 */
+    AppBuildStatusVO getBuildStatus(Long appId, UserAccount loginUser);
 
     boolean rollback(Long appId, Integer versionNo, UserAccount loginUser);
 
