@@ -8,11 +8,14 @@ import com.lian.aicode.exception.BusinessException;
 import com.lian.aicode.exception.ErrorCode;
 import com.lian.aicode.mapper.AppChatSummaryMapper;
 import com.lian.aicode.mapper.AppMapper;
+import com.lian.aicode.mapper.AppVersionMapper;
 import com.lian.aicode.mapper.ChatHistoryMapper;
 import com.lian.aicode.model.dto.chathistory.ChatHistoryQueryRequest;
 import com.lian.aicode.model.entity.App;
 import com.lian.aicode.model.entity.AppChatSummary;
 import com.lian.aicode.model.entity.ChatHistory;
+import com.lian.aicode.model.entity.AppVersion;
+import com.lian.aicode.model.enums.AppVersionStatusEnum;
 import com.lian.aicode.model.entity.UserAccount;
 import com.lian.aicode.model.enums.ChatHistoryMessageTypeEnum;
 import com.lian.aicode.model.vo.ChatHistoryStatsVO;
@@ -75,6 +78,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
     private final ChatHistoryMapper chatHistoryMapper;
     private final AppChatSummaryMapper summaryMapper;
     private final AppMapper appMapper;
+    private final AppVersionMapper appVersionMapper;
     private final UserService userService;
     private final AppCollaboratorService collaboratorService;
     private final ObjectProvider<AiCodeGeneratorService> aiServiceProvider;
@@ -94,6 +98,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
     public ChatHistoryServiceImpl(ChatHistoryMapper chatHistoryMapper,
                                   AppChatSummaryMapper summaryMapper,
                                   AppMapper appMapper,
+                                  AppVersionMapper appVersionMapper,
                                   UserService userService,
                                   AppCollaboratorService collaboratorService,
                                   ObjectProvider<AiCodeGeneratorService> aiServiceProvider,
@@ -103,6 +108,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         this.chatHistoryMapper = chatHistoryMapper;
         this.summaryMapper = summaryMapper;
         this.appMapper = appMapper;
+        this.appVersionMapper = appVersionMapper;
         this.userService = userService;
         this.collaboratorService = collaboratorService;
         this.aiServiceProvider = aiServiceProvider;
@@ -292,6 +298,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         if (excludedMessageId != null) {
             query.ne("id", excludedMessageId);
         }
+        appendNonReadyVersionFilter(appId, query);
         List<ChatHistory> historyList = chatHistoryMapper.selectListByQuery(query).reversed();
         for (ChatHistory history : historyList) {
             if (ChatHistoryMessageTypeEnum.USER.getValue().equals(history.getMessageType())) {
@@ -303,6 +310,29 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
             }
         }
         return messages;
+    }
+
+    /**
+     * 记忆恢复排除未完成版本的消息（与文件回退对齐）。
+     *
+     * <p>2026-09-25 真机事故：应用 v12 轮次被取消后文件系统正确回退（下一版从 v11 继承），
+     * 但其用户消息「新增一个带图表的数据看板页面」留在对话记忆里；下一次生成恢复记忆时，
+     * 模型把这条没有 AI 回应的"幽灵指令"当成主要任务，做了看板页而忽略真实需求。只有到达
+     * ready 的版本其消息才构成有效上下文；version_no 为空的早期消息不属于任何失败轮次，保留。</p>
+     */
+    private void appendNonReadyVersionFilter(Long appId, QueryWrapper query) {
+        List<Integer> nonReadyVersions = appVersionMapper.selectListByQuery(QueryWrapper.create()
+                        .eq("app_id", appId)
+                        .in("status", List.of(AppVersionStatusEnum.GENERATING.getValue(),
+                                AppVersionStatusEnum.FAILED.getValue(),
+                                AppVersionStatusEnum.CANCELLED.getValue())))
+                .stream().map(AppVersion::getVersionNo).toList();
+        if (nonReadyVersions.isEmpty()) {
+            return;
+        }
+        // NOT IN 对 NULL 行返回未知而不为真，必须显式放行 version_no 为空的早期消息。
+        String placeholders = String.join(",", java.util.Collections.nCopies(nonReadyVersions.size(), "?"));
+        query.and("(version_no IS NULL OR version_no NOT IN (" + placeholders + "))", nonReadyVersions.toArray());
     }
 
     private Long parseMemoryAppId(String memoryId) {
@@ -365,7 +395,8 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         if (generationTaskManager.isGenerating(appId)) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "当前应用正在生成代码，请完成后再生成摘要");
         }
-        AiCodeGeneratorService aiService = aiServiceProvider.getIfAvailable();
+        // 摘要是同步模型调用：优先按次创建无状态服务（prototype 模型），工厂缺席时回退默认服务。
+        AiCodeGeneratorService aiService = resolveStatelessAiService();
         if (aiService == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 模型未配置，无法生成对话摘要");
         }
@@ -390,7 +421,7 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
         if (existing != null && messageCount - coveredCount < Math.max(triggerCount / 2, 2)) {
             return;
         }
-        AiCodeGeneratorService aiService = aiServiceProvider.getIfAvailable();
+        AiCodeGeneratorService aiService = resolveStatelessAiService();
         if (aiService == null || !summarizingApps.add(appId)) {
             return;
         }
@@ -412,6 +443,17 @@ public class ChatHistoryServiceImpl implements ChatHistoryService {
             summarizingApps.remove(appId);
             log.error("提交应用对话摘要任务失败：appId={}", appId, exception);
         }
+    }
+
+    /**
+     * 解析用于命名/摘要等无状态模型调用的 AI Service。
+     *
+     * <p>第十期起优先使用工厂的按次实例（每次调用都拿全新的 prototype 模型），
+     * 工厂未装配（无 API Key 或测试桩环境）时回退到默认无状态服务。</p>
+     */
+    private AiCodeGeneratorService resolveStatelessAiService() {
+        AiCodeGeneratorServiceFactory factory = aiServiceFactoryProvider.getIfAvailable();
+        return factory != null ? factory.getForStatelessTask() : aiServiceProvider.getIfAvailable();
     }
 
     private ChatSummaryVO summarizeInternal(Long appId, AiCodeGeneratorService aiService, String actorAccount) {
