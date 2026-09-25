@@ -86,6 +86,64 @@ class CodeParserTest {
                 () -> htmlCodeParser.parseCode("<html><body><h1>半截"));
     }
 
+    /**
+     * 2026-09-25 真机验收样本：模型未被要求结构化输出，却自发返回 ```json 围栏包裹的
+     * {"htmlCode": ..., "description": ...}。解析器必须提取 htmlCode 字段（JSON 反转义后），
+     * 而不是把整段原始输出落盘成 index.html。
+     */
+    @Test
+    void parsesJsonFencedOutputByExtractingHtmlCodeField() {
+        String content = """
+                ```json
+                {
+                  "htmlCode": "<!DOCTYPE html>\\n<html lang=\\"zh-CN\\">\\n<body><h1>原子结构演示</h1></body></html>",
+                  "description": "一个可交互的原子结构教学页面"
+                }
+                ```
+                """;
+
+        HtmlCodeResult result = htmlCodeParser.parseCode(content);
+
+        assertEquals("<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<body><h1>原子结构演示</h1></body></html>",
+                result.getHtmlCode());
+        assertEquals("一个可交互的原子结构教学页面", result.getDescription());
+    }
+
+    @Test
+    void parsesBareJsonObjectWithoutFence() {
+        String content = "{\"htmlCode\": \"<html><body>ok</body></html>\", \"description\": \"说明\"}";
+
+        HtmlCodeResult result = htmlCodeParser.parseCode(content);
+
+        assertEquals("<html><body>ok</body></html>", result.getHtmlCode());
+        assertEquals("说明", result.getDescription());
+    }
+
+    /**
+     * 围栏内是非法 JSON 时必须按生成失败拒绝：此类内容以 ```json 开头，
+     * 绝不能走"原始输出兜底落盘"路径变成可用版本。
+     */
+    @Test
+    void rejectsInvalidJsonFenceInsteadOfSavingRawOutput() {
+        String content = """
+                ```json
+                {"htmlCode": "<!DOCTYPE html><html><body>半截</html>",  描述没有闭合
+                ```
+                """;
+
+        assertThrows(BusinessException.class, () -> htmlCodeParser.parseCode(content));
+    }
+
+    /**
+     * 完整性守卫的形态检查：正文说明里 merely 出现 </html> 字面量不能算完整文档，
+     * 最终内容必须以 <!DOCTYPE 或 <html 开头，否则拒绝保存。
+     */
+    @Test
+    void rejectsProseThatMerelyContainsClosingTag() {
+        assertThrows(BusinessException.class, () -> htmlCodeParser.parseCode(
+                "这是一段说明文字，中间出现了 </html> 字样，但它不是 HTML 文档"));
+    }
+
     @Test
     void rejectsMultiFileHtmlBlockWithoutClosingTag() {
         String content = """
